@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
@@ -88,13 +88,15 @@ const q = v => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').repla
 
 function isBookPath(p) { return /^(Books|Sermons)\/[^/]+\.md$/i.test(p); }
 function isDraftPath(p) { return /^Drafts\/[^/]+\.md$/i.test(p); }
-function isTracked(p) { return isCardPath(p) || isBookPath(p) || isDraftPath(p); }
+function isDevoPath(p) { return /^Devotionals\/[^/]+\.md$/i.test(p); }
+function isTracked(p) { return isCardPath(p) || isBookPath(p) || isDraftPath(p) || isDevoPath(p); }
+function makeDevo(path, text, sha, extra = {}) { return { kind: 'devo', path, sha: sha || null, text, title: path.split('/').pop().replace(/\.md$/i, ''), edited: extra.edited || 0 }; }
 function makeDraft(path, text, sha, extra = {}) { return { kind: 'draft', path, sha: sha || null, text, title: path.split('/').pop().replace(/\.md$/i, ''), edited: extra.edited || 0 }; }
-function makeDoc(path, text, sha, extra) { return isDraftPath(path) ? makeDraft(path, text, sha, extra) : isBookPath(path) ? makeBook(path, text, sha, extra) : makeCard(path, text, sha, extra); }
-function docGet(p) { return S.cards.get(p) || S.books.get(p) || (S.drafts && S.drafts.get(p)); }
-function docSet(d) { (d.kind === 'book' ? S.books : d.kind === 'draft' ? (S.drafts = S.drafts || new Map()) : S.cards).set(d.path, d); }
-function docDel(p) { S.cards.delete(p); S.books.delete(p); S.drafts && S.drafts.delete(p); }
-function allDocs() { return [...S.cards.values(), ...S.books.values(), ...(S.drafts ? S.drafts.values() : [])]; }
+function makeDoc(path, text, sha, extra) { return isDevoPath(path) ? makeDevo(path, text, sha, extra) : isDraftPath(path) ? makeDraft(path, text, sha, extra) : isBookPath(path) ? makeBook(path, text, sha, extra) : makeCard(path, text, sha, extra); }
+function docGet(p) { return S.cards.get(p) || S.books.get(p) || (S.drafts && S.drafts.get(p)) || (S.devos && S.devos.get(p)); }
+function docSet(d) { (d.kind === 'book' ? S.books : d.kind === 'draft' ? (S.drafts = S.drafts || new Map()) : d.kind === 'devo' ? (S.devos = S.devos || new Map()) : S.cards).set(d.path, d); }
+function docDel(p) { S.cards.delete(p); S.books.delete(p); S.drafts && S.drafts.delete(p); S.devos && S.devos.delete(p); }
+function allDocs() { return [...S.cards.values(), ...S.books.values(), ...(S.drafts ? S.drafts.values() : []), ...(S.devos ? S.devos.values() : [])]; }
 function isCardPath(p) { return /\.md$/i.test(p) && ((p.startsWith('Cards/') && p.split('/').length === 3) || (p.startsWith(INBOX + '/') && p.split('/').length === 2)); }
 function boxOf(p) { return p.startsWith('Cards/') ? p.split('/')[1] : ''; }
 function folderFor(box) { return box ? `Cards/${box}` : INBOX; }
@@ -368,7 +370,7 @@ async function loadLocal() {
   const [rows, boxes, last] = await Promise.all([DB.all('cards'), DB.get('boxes'), DB.get('lastSync')]);
   S.boxes = boxes || [];
   S.sync.last = last || 0;
-  S.cards = new Map(); S.books = new Map(); S.drafts = new Map();
+  S.cards = new Map(); S.books = new Map(); S.drafts = new Map(); S.devos = new Map();
   for (const r of rows) { if (!isTracked(r.path)) continue; const d = makeDoc(r.path, r.text, r.sha, { edited: r.edited }); docSet(d); }
   S.outbox = (await DB.all('outbox')).length;
 }
@@ -540,6 +542,8 @@ function parseHash() {
   if (h === 'all') return { kind: 'all' };
   if (h === 'inbox') return { kind: 'inbox' };
   if (h === 'starred') return { kind: 'starred' };
+  if (h === 'devotionals') return { kind: 'devos' };
+  if (h.startsWith('devo/')) { const m = /^devo\/(.+)\/(\d+)$/.exec(h); if (m) return { kind: 'devo', name: m[1], n: +m[2] }; return { kind: 'devos' }; }
   if (h.startsWith('compile/book/')) return { kind: 'compile', doc: 'book', name: h.slice(13) };
   if (h.startsWith('compile/series/')) return { kind: 'compile', doc: 'series', name: h.slice(15) };
   if (h.startsWith('box/')) return { kind: 'box', name: h.slice(4) };
@@ -554,6 +558,7 @@ function parseHash() {
 }
 function hashFor(v) {
   if (v.kind === 'all') return '#/all'; if (v.kind === 'inbox') return '#/inbox'; if (v.kind === 'starred') return '#/starred';
+  if (v.kind === 'devos') return '#/devotionals'; if (v.kind === 'devo') return '#/devo/' + encodeURIComponent(v.name) + '/' + v.n;
   if (v.kind === 'compile') return `#/compile/${v.doc}/` + encodeURIComponent(v.name);
   if (v.kind === 'box') return '#/box/' + encodeURIComponent(v.name);
   if (v.kind === 'project') return '#/project/' + encodeURIComponent(v.name);
@@ -631,7 +636,8 @@ function renderNav() {
     <a class="nav-item" href="#/inbox" ${cur('inbox')}>${icon('inbox')}Inbox${cn.inbox ? `<span class="badge">${num(cn.inbox)}</span>` : ''}</a>
     <a class="nav-item" href="#/all" ${cur('all')}>${icon('stack')}All cards<span class="count">${num(cn.total)}</span></a>
     <a class="nav-item" href="#/starred" ${cur('starred')}>${icon('star')}Starred<span class="count">${num(cn.starred)}</span></a>
-    ${['book', 'series'].map(d => `<a class="nav-item" href="${LEX[d].allHash}" ${(v.kind === 'books' || v.kind === 'book') && v.doc === d && !S.q ? 'aria-current="page"' : ''}>${icon(d === 'book' ? 'book' : 'pulpit')}${LEX[d].tab}<span class="count">${num(sortedBooks(d).length)}</span></a>`).join('')}`;
+    ${['book', 'series'].map(d => `<a class="nav-item" href="${LEX[d].allHash}" ${(v.kind === 'books' || v.kind === 'book') && v.doc === d && !S.q ? 'aria-current="page"' : ''}>${icon(d === 'book' ? 'book' : 'pulpit')}${LEX[d].tab}<span class="count">${num(sortedBooks(d).length)}</span></a>`).join('')}
+    <a class="nav-item" href="#/devotionals" ${(v.kind === 'devos' || v.kind === 'devo') && !S.q ? 'aria-current="page"' : ''}>${icon('flame')}Devotionals<span class="count">${num(devoAll().length)}</span></a>`;
   $('#nav-boxes').innerHTML = `<div class="nav-head"><span>Boxes</span></div>` + allBoxes().map(b =>
     `<a class="nav-item" href="${hashFor({ kind: 'box', name: b.name })}" ${cur('box', b.name)}><span class="tab" style="--h:${b.hue}"></span>${esc(b.name)}<span class="count">${num(cn.box.get(b.name) || 0)}</span></a>`).join('');
   const projs = [...cn.proj.entries()].sort((a, b) => a[0].localeCompare(b[0]));
@@ -644,7 +650,7 @@ function render() {
   if (S.coach && S.coach.open) { renderCoach(); observeChapters(); if (S.view.kind === 'book') focusChapter(S.coach.ci || 0); }
   const cb = $('#coach-btn'); if (cb) cb.setAttribute('aria-pressed', !!(S.coach && S.coach.open));
   const k = S.view.kind, d = S.view.doc;
-  const tab = k === 'desk' ? 'desk' : (k === 'books' || k === 'book' || k === 'compile') ? (d === 'series' ? 'sermons' : 'books') : 'boxes';
+  const tab = k === 'desk' ? 'desk' : (k === 'devos' || k === 'devo') ? 'devos' : (k === 'books' || k === 'book' || k === 'compile') ? (d === 'series' ? 'sermons' : 'books') : 'boxes';
   $$('#tabbar [data-tab]').forEach(b => b.setAttribute('aria-current', b.dataset.tab === tab ? 'page' : 'false'));
   document.body.dataset.view = k;
 }
@@ -656,6 +662,8 @@ function renderMain() {
   const toks = tokens();
   if (toks.length) return renderSearch(el, toks);
   if (S.view.kind === 'desk') return renderDesk(el);
+  if (S.view.kind === 'devos') return renderDevos(el);
+  if (S.view.kind === 'devo') return renderDevo(el);
   if (S.view.kind === 'books') return renderBooks(el, S.view.doc);
   if (S.view.kind === 'book') { const b = curBook(); if (b) return renderBook(el, b); return renderBooks(el, S.view.doc); }
   if (S.view.kind === 'compile') { const b = bookByName(S.view.name, S.view.doc); if (b) return renderCompile(el, b); return renderBooks(el, S.view.doc); }
@@ -737,6 +745,7 @@ function renderDesk(el) {
     </section>
     ${otd.length ? `<section class="desk-section"><div class="section-head"><h2>${otdLabel}</h2><p>${fmtDate(today(), true).replace(/,? \d{4}$/, '')}, in years past</p></div><div class="strip">${otd.map(c => tileHTML(c)).join('')}</div></section>` : ''}
     ${recent.length ? `<section class="desk-section"><div class="section-head"><h2>Recently edited</h2><p>On this device</p></div><div class="strip">${recent.map(c => tileHTML(c)).join('')}</div></section>` : ''}
+    ${devoDeskHTML()}
     ${postHTML()}
     ${quoteHTML()}
     ${(() => { const st = [...S.cards.values()].filter(isStarred).sort((x, y) => (y.edited || 0) - (x.edited || 0)).slice(0, 12); return st.length ? `<section class="desk-section"><div class="section-head"><h2>Starred</h2><p><a class="crumb" href="#/starred">See all</a></p></div><div class="strip">${st.map(c => tileHTML(c)).join('')}</div></section>` : ''; })()}
@@ -1744,6 +1753,208 @@ async function draftAct(act, el) {
   }
 }
 
+/* ---------------- devotionals ---------------- */
+const DEVO_FIELDS = [['sit', 'Sit with it'], ['pray', 'Pray'], ['try', 'Try this today']];
+function devoParse(d) {
+  if (d._parsed && d._parsed.text === d.text) return d._parsed.v;
+  const { props, body } = parseFM(d.text);
+  const out = { path: d.path, title: d.title, subtitle: asStr(props.subtitle), about: '', weeks: [], items: [] };
+  let week = null, item = null, inAbout = false; const pre = [];
+  const close = () => { if (item) { item.body = item.bodyLines.join('\n').trim(); delete item.bodyLines; } item = null; };
+  for (const raw of body.replace(/\r/g, '').split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    let m;
+    if ((m = /^#\s+(.+)$/.exec(line))) { close(); inAbout = false; week = { title: m[1].trim(), items: [] }; out.weeks.push(week); continue; }
+    if ((m = /^##\s+(.+)$/.exec(line))) {
+      close();
+      if (/^about$/i.test(m[1].trim())) { inAbout = true; continue; }
+      inAbout = false;
+      if (!week) { week = { title: '', items: [] }; out.weeks.push(week); }
+      const tm = /^(\d+)[.)]\s*(.+)$/.exec(m[1].trim());
+      item = { title: tm ? tm[2] : m[1].trim(), ref: '', verse: '', big: '', sit: '', pray: '', try: '', cards: [], bodyLines: [], week: week.title };
+      week.items.push(item); out.items.push(item); continue;
+    }
+    if (inAbout || !item) { pre.push(line); continue; }
+    if ((m = /^>\s*\*\*(.+?)\*\*\s*(.*)$/.exec(line))) { item.ref = m[1].trim(); item.verse = m[2].trim().replace(/^["“]|["”]$/g, ''); continue; }
+    if ((m = /^\*\*The big idea:?\*\*:?\s*(.+)$/i.exec(line))) { item.big = m[1].trim(); continue; }
+    const f = DEVO_FIELDS.find(([, l]) => new RegExp('^\\*\\*' + l + ':?\\*\\*', 'i').test(line));
+    if (f) { item[f[0]] = line.replace(/^\*\*[^*]+\*\*:?\s*/, '').trim(); continue; }
+    if (/^\*Built from:\*/.test(line)) { item.cards = [...line.matchAll(/\[\[([^\]]+)\]\]/g)].map(x => x[1] + '.md'); continue; }
+    item.bodyLines.push(line);
+  }
+  close();
+  out.about = pre.join('\n').trim();
+  out.items.forEach((it, i) => { it.n = i + 1; it.words = ((it.big + ' ' + it.body + ' ' + it.sit + ' ' + it.pray + ' ' + it.try).match(/\S+/g) || []).length; });
+  d._parsed = { text: d.text, v: out };
+  return out;
+}
+function devoCols() { return [...(S.devos ? S.devos.values() : [])].sort((a, b) => a.title.localeCompare(b.title)).map(devoParse); }
+function devoAll() { return devoCols().flatMap(c => c.items.map(it => ({ col: c, it }))); }
+function devoDone() { try { return JSON.parse(localStorage.getItem('cardeck.devo') || '{}'); } catch (_) { return {}; } }
+function devoKey(col, it) { return `${col.path}#${it.n}`; }
+function devoIsDone(col, it) { return !!devoDone()[devoKey(col, it)]; }
+function devoToday() {
+  const all = devoAll(); if (!all.length) return null;
+  const done = devoDone();
+  const next = all.find(x => !done[devoKey(x.col, x.it)]);
+  return next || all[hashStr(today()) % all.length];
+}
+function devoHash(col, it) { return hashFor({ kind: 'devo', name: col.title, n: it.n }); }
+function devoCur() {
+  const v = S.view; const col = devoCols().find(c => c.title === v.name); if (!col) return null;
+  const it = col.items.find(x => x.n === v.n); return it ? { col, it } : null;
+}
+function devoMins(it) { return Math.max(2, Math.round(it.words / 170)); }
+function devoText(col, it) {
+  return [it.title.toUpperCase(), it.ref ? `${it.ref}\n“${it.verse}”` : '', it.big, plainKeepLines(it.body),
+    ...DEVO_FIELDS.filter(([k]) => it[k]).map(([k, l]) => `${l}: ${plain(it[k])}`)].filter(Boolean).join('\n\n');
+}
+function plainKeepLines(md) { return (md || '').split(/\n\s*\n/).map(p => p.split('\n').map(plain).join('\n')).join('\n\n'); }
+function devoDeskHTML() {
+  const t = devoToday(); if (!t) return '';
+  const { col, it } = t; const done = devoDone(); const doneN = devoAll().filter(x => done[devoKey(x.col, x.it)]).length; const total = devoAll().length;
+  return `<section class="desk-section devo-desk">
+    <div class="section-head"><h2>Today’s devotional</h2><p><a class="crumb" href="#/devotionals">All ${num(total)}</a></p></div>
+    <a class="devo-hero" href="${devoHash(col, it)}">
+      <span class="devo-hero-top"><span class="devo-day">Day ${it.n}</span><span>${esc(col.title)} · ${devoMins(it)} min</span></span>
+      <span class="devo-hero-title">${esc(it.title)}</span>
+      ${it.big ? `<span class="devo-hero-big">${esc(it.big)}</span>` : ''}
+      ${it.ref ? `<span class="devo-hero-ref">${icon('flame')}${esc(it.ref)}</span>` : ''}
+      <span class="devo-hero-go">Read today’s devotional<span class="devo-prog-mini">${num(doneN)} of ${num(total)} done</span></span>
+    </a></section>`;
+}
+function renderDevos(el) {
+  const cols = devoCols(); S.list = [];
+  if (S.devoEdit) { const d = S.devos.get(S.devoEdit); if (d) return renderDevoEdit(el, d); S.devoEdit = null; }
+  if (!cols.length) {
+    el.innerHTML = `<div class="view-head"><div><h1 class="view-title">Devotionals</h1><p class="view-sub">Short readings built from your own cards.</p></div></div>
+      <div class="empty"><h3>No devotionals yet</h3><p>Start a collection. Each devotional gets a verse, one big idea, a short reading, a question, a prayer, and one thing to try today.</p><button class="btn btn-primary" data-act="devo-new">${icon('plus')}Start a collection</button></div>`;
+    return;
+  }
+  const done = devoDone(); const t = devoToday();
+  el.innerHTML = cols.map(col => {
+    const dn = col.items.filter(it => done[devoKey(col, it)]).length; const pct = col.items.length ? Math.round(100 * dn / col.items.length) : 0;
+    const today = t && t.col.path === col.path ? t.it : col.items[0];
+    return `<div class="devo-index">
+      <header class="devo-head">
+        <p class="devo-eyebrow">${icon('flame')}Devotionals</p>
+        <h1 class="devo-coltitle">${esc(col.title)}</h1>
+        ${col.subtitle ? `<p class="devo-sub">${esc(col.subtitle)}</p>` : ''}
+        <div class="devo-progress"><div class="progress"><i style="width:${pct}%"></i></div><span>${num(dn)} of ${num(col.items.length)} done</span></div>
+        <div class="row devo-head-actions">
+          ${today ? `<a class="btn btn-primary" href="${devoHash(col, today)}">${icon('flame')}${dn && dn < col.items.length ? `Continue with day ${today.n}` : dn === col.items.length ? 'Read today’s' : 'Start day 1'}</a>` : ''}
+          <button class="btn" data-act="devo-edit" data-path="${esc(col.path)}">${icon('pen')}Edit</button>
+          <button class="btn btn-quiet" data-act="devo-copyall" data-path="${esc(col.path)}">Copy all</button>
+          <button class="btn btn-quiet" data-act="devo-md" data-path="${esc(col.path)}">Download</button>
+          <button class="btn btn-quiet" data-act="print">Print or PDF</button>
+        </div>
+      </header>
+      ${col.about ? `<div class="devo-about">${renderMd(col.about)}</div>` : ''}
+      ${col.weeks.filter(w => w.items.length).map(w => `<section class="devo-week"><h2 class="devo-weektitle">${esc(w.title)}</h2>
+        <div class="devo-grid">${w.items.map(it => { const isDone = !!done[devoKey(col, it)]; const isToday = t && t.col.path === col.path && t.it.n === it.n;
+          return `<a class="devo-tile${isDone ? ' is-done' : ''}${isToday ? ' is-today' : ''}" href="${devoHash(col, it)}">
+            <span class="devo-n">${isDone ? icon('check') : it.n}</span>
+            <span class="devo-tbody"><span class="devo-t">${esc(it.title)}</span>${it.ref ? `<span class="devo-ref">${esc(it.ref)}</span>` : ''}${it.big ? `<span class="devo-big">${esc(it.big)}</span>` : ''}</span>
+            ${isToday ? '<span class="devo-flag">Today</span>' : ''}</a>`; }).join('')}</div></section>`).join('')}
+      <article class="manuscript devo-print">${col.items.map(it => devoBodyHTML(col, it)).join('')}</article>
+    </div>`;
+  }).join('');
+}
+function devoBodyHTML(col, it) {
+  return `<section class="devo-piece">
+    <p class="devo-pos">Day ${it.n} of ${col.items.length}${it.week ? ` · ${esc(it.week)}` : ''}</p>
+    <h1 class="devo-title">${esc(it.title)}</h1>
+    ${it.ref ? `<blockquote class="devo-verse"><p>“${esc(it.verse)}”</p><cite>${esc(it.ref)}</cite></blockquote>` : ''}
+    ${it.big ? `<p class="devo-bigidea">${esc(it.big)}</p>` : ''}
+    <div class="devo-body">${renderMd(it.body)}</div>
+    <div class="devo-steps">${DEVO_FIELDS.filter(([k]) => it[k]).map(([k, l]) => `<div class="devo-step devo-${k}"><h3>${l}</h3>${renderMd(it[k])}</div>`).join('')}</div>
+    ${it.cards.length ? `<div class="dr-cards devo-cards"><span>Built from ${it.cards.length === 1 ? 'your card' : `${it.cards.length} of your cards`}</span>${it.cards.map(p => { const c = S.cards.get(p); return `<button class="chip-card" data-open="${esc(p)}">${esc(c ? c.title : p.split('/').pop().replace(/\.md$/, ''))}</button>`; }).join('')}</div>` : ''}
+  </section>`;
+}
+function renderDevo(el) {
+  const cur = devoCur(); if (!cur) return renderDevos(el);
+  const { col, it } = cur; S.list = it.cards.filter(p => S.cards.has(p));
+  if (S.speaking && S.speakFor !== devoKey(col, it)) stopSpeaking();
+  const prev = col.items[it.n - 2], next = col.items[it.n];
+  const isDone = devoIsDone(col, it);
+  el.innerHTML = `<div class="devo-read">
+    <div class="devo-top"><a class="crumb" href="#/devotionals">${icon('flame')}${esc(col.title)}</a><span class="devo-mins">${devoMins(it)} min</span></div>
+    ${devoBodyHTML(col, it)}
+    <div class="devo-bar">
+      <button class="btn ${isDone ? '' : 'btn-primary'}" data-act="devo-done" aria-pressed="${isDone}">${icon('check')}${isDone ? 'Done' : 'Mark done'}</button>
+      <button class="btn" data-act="devo-listen" aria-pressed="${!!S.speaking}">${S.speaking ? 'Stop' : 'Listen'}</button>
+      <button class="btn btn-quiet" data-act="devo-share">${icon('share')}Share</button>
+      <button class="btn btn-quiet" data-act="devo-copy">Copy</button>
+    </div>
+    <nav class="devo-pager">
+      ${prev ? `<a class="devo-pg prev" href="${devoHash(col, prev)}"><small>Day ${prev.n}</small><span>${esc(prev.title)}</span></a>` : '<span></span>'}
+      ${next ? `<a class="devo-pg next" href="${devoHash(col, next)}"><small>Day ${next.n}</small><span>${esc(next.title)}</span></a>` : `<a class="devo-pg next" href="#/devotionals"><small>That’s all ${col.items.length}</small><span>Back to ${esc(col.title)}</span></a>`}
+    </nav>
+  </div>`;
+}
+function renderDevoEdit(el, d) {
+  el.innerHTML = `<div class="view-head"><div><a class="crumb" href="#/devotionals">Devotionals</a><h1 class="view-title">${esc(d.title)}</h1></div></div>
+    <div class="dr-edit"><p class="muted dr-help"># starts a week, ## starts a devotional (“## 3. Title”). Then a verse line (&gt; **Ref** “text”), **The big idea:**, your reading, **Sit with it:**, **Pray:**, **Try this today:**, and *Built from:* [[card links]].</p>
+    <textarea id="devo-text" spellcheck="true">${esc(parseFM(d.text).body)}</textarea>
+    <div class="row"><button class="btn btn-primary" data-act="devo-save">${icon('check')}Save</button><button class="btn" data-act="devo-cancel">Cancel</button></div></div>`;
+  const ta = $('#devo-text'); ta.style.height = Math.max(480, Math.min(ta.scrollHeight + 20, 4000)) + 'px'; ta.focus({ preventScroll: true });
+}
+function devoStep(dir) {
+  const cur = devoCur(); if (!cur) return;
+  const to = cur.col.items[cur.it.n - 1 + dir]; if (to) { stopSpeaking(); location.hash = devoHash(cur.col, to); }
+}
+function stopSpeaking() { if (S.speaking && 'speechSynthesis' in window) { speechSynthesis.cancel(); S.speaking = false; } }
+async function devoAct(act, el) {
+  if (act === 'devo-new') {
+    const path = 'Devotionals/My devotionals.md';
+    const body = `## About\n\nA few words about this collection.\n\n# Week 1\n\n## 1. Title\n\n> **Reference** “The verse.”\n\n**The big idea:** One line.\n\nYour reading.\n\n**Sit with it:** A question.\n\n**Pray:** A short prayer.\n\n**Try this today:** One small thing.\n`;
+    const d = makeDevo(path, `---\ntype: devotional\nsubtitle: ""\nstatus: started\n---\n${body}`, null); docSet(d);
+    await DB.putCards([d]); if (S.gh) await queue({ kind: 'put', path, text: d.text, sha: null, msg: `Devotionals: ${d.title}` });
+    S.devoEdit = path; render(); return;
+  }
+  if (act === 'devo-edit') { S.devoEdit = el.dataset.path; location.hash === '#/devotionals' ? render() : (location.hash = '#/devotionals'); return; }
+  if (act === 'devo-cancel') { S.devoEdit = null; render(); return; }
+  if (act === 'devo-save') {
+    const d = S.devos.get(S.devoEdit); if (!d) return;
+    const fm = (/^---\n[\s\S]*?\n---\n/.exec(d.text) || [''])[0];
+    d.text = fm + $('#devo-text').value.replace(/\s+$/, '') + '\n'; d.edited = Date.now(); d._parsed = null;
+    await DB.putCards([d]); if (S.gh) await queue({ kind: 'put', path: d.path, text: d.text, sha: d.sha, msg: `Devotionals: ${d.title}` });
+    S.devoEdit = null; render(); toast('Devotionals saved'); return;
+  }
+  if (act === 'devo-copyall' || act === 'devo-md') {
+    const col = devoCols().find(c => c.path === el.dataset.path); if (!col) return;
+    if (act === 'devo-md') { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([parseFM(S.devos.get(col.path).text).body], { type: 'text/markdown' })); a.download = `${safeName(col.title)}.md`; document.body.appendChild(a); a.click(); a.remove(); return; }
+    const text = col.items.map(it => `DAY ${it.n}\n` + devoText(col, it)).join('\n\n———\n\n');
+    try { await navigator.clipboard.writeText(text); toast(`All ${col.items.length} copied`); } catch (_) { toast('Copy isn’t allowed here. Use Download instead.'); } return;
+  }
+  const cur = devoCur(); if (!cur) return; const { col, it } = cur;
+  if (act === 'devo-done') {
+    const done = devoDone(); const k = devoKey(col, it);
+    if (done[k]) delete done[k]; else done[k] = today();
+    try { localStorage.setItem('cardeck.devo', JSON.stringify(done)); } catch (_) { }
+    render(); if (done[k]) toast(it.n < col.items.length ? `Day ${it.n} done. Day ${it.n + 1} is ready when you are.` : `All ${col.items.length} done. Well run.`); return;
+  }
+  if (act === 'devo-copy') { try { await navigator.clipboard.writeText(devoText(col, it)); toast('Devotional copied'); } catch (_) { toast('Copy isn’t allowed here.'); } return; }
+  if (act === 'devo-share') {
+    const text = devoText(col, it);
+    if (navigator.share) { try { await navigator.share({ title: it.title, text }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+    try { await navigator.clipboard.writeText(text); toast('Copied. Paste it anywhere.'); } catch (_) { toast('Sharing isn’t available here.'); } return;
+  }
+  if (act === 'devo-listen') {
+    if (!('speechSynthesis' in window)) { toast('Listening isn’t available on this device.'); return; }
+    if (S.speaking) { stopSpeaking(); render(); return; }
+    const text = [it.title + '.', it.ref ? `${it.ref}. ${it.verse}` : '', it.big, plain(it.body.replace(/\n/g, '\n\n')), ...DEVO_FIELDS.filter(([k]) => it[k]).map(([k, l]) => `${l}. ${plain(it[k])}`)].filter(Boolean).join(' ');
+    const chunks = text.match(/[^.!?]+[.!?]+["”’)]?\s*/g) || [text]; S.speaking = true; S.speakFor = devoKey(col, it); render();
+    chunks.forEach((c, i) => { const u = new SpeechSynthesisUtterance(c); u.rate = 0.97; if (i === chunks.length - 1) u.onend = () => { S.speaking = false; render(); }; speechSynthesis.speak(u); });
+  }
+}
+
+(() => {
+  let sx = 0, sy = 0, st = 0;
+  document.addEventListener('touchstart', e => { if (S.view && S.view.kind === 'devo' && !S.reader && e.touches.length === 1 && !e.target.closest('textarea,input,button')) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; st = Date.now(); } else st = 0; }, { passive: true });
+  document.addEventListener('touchend', e => { if (!st || Date.now() - st > 650) return; const t = e.changedTouches[0]; const dx = t.clientX - sx, dy = t.clientY - sy; st = 0; if (Math.abs(dx) > 80 && Math.abs(dy) < 50) devoStep(dx < 0 ? 1 : -1); }, { passive: true });
+})();
+
 /* ---------------- stars, sharing, chapter list, manuscript, shortcuts ---------------- */
 function isStarred(c) { return !!c && c.extra && String(c.extra.starred) === 'true'; }
 async function toggleStar(path) {
@@ -2254,6 +2465,7 @@ function bind() {
       case 'keys': showKeys(); break;
       case 'tab-boxes': toggleDrawer(true); break;
       case 'draft-new': case 'draft-edit': case 'draft-cancel': case 'draft-save': case 'draft-copy': case 'draft-md': case 'draft-listen': draftAct(a.dataset.act, a); break;
+      case 'devo-listen': case 'devo-copy': case 'devo-share': case 'devo-done': case 'devo-edit': case 'devo-save': case 'devo-cancel': case 'devo-copyall': case 'devo-new': case 'devo-md': devoAct(a.dataset.act, a); break;
       case 'p-share': case 'p-copy': case 'p-next': case 'p-posted': postAct(a.dataset.act, a); break;
       case 'q-share': case 'q-copy': case 'q-image': case 'q-next': case 'q-save': quoteAct(a.dataset.act); break;
       case 'paste-link': { let t = ''; try { t = await navigator.clipboard.readText(); } catch (_) { } if (t && t.includes('connect=')) { useLink(t, $('#paste-msg')); } else { setupLink(); } break; }
@@ -2331,6 +2543,7 @@ function bind() {
       if (e.key === 's') { toggleStar(S.reader.path); return; }
     }
     if (S.reader && S.reader.editing) return;
+    if (!S.reader && S.view.kind === 'devo' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { devoStep(e.key === 'ArrowLeft' ? -1 : 1); e.preventDefault(); return; }
     if (e.key === '/') { e.preventDefault(); if (S.reader) closeReader(); $('#q').focus(); }
     else if (e.key === 'n') { e.preventDefault(); openReader(null, { isNew: true, replace: !!S.reader }); }
     else if (e.key === 'r') { draw(); }
