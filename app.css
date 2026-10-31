@@ -705,3 +705,13 @@ mark { background: linear-gradient(transparent 12%, var(--marker) 12%, var(--mar
 .a2hs { border-style: solid; border-color: rgba(255,95,31,.5); align-items: center; }
 .a2hs > .ico { color: var(--accent); }
 .a2hs .icon-btn { margin-left: auto; }
+/* daily quote */
+.qcard { margin: 0; background: linear-gradient(135deg, #ff9a46, #ff5f1f 50%, #d9420a); border-radius: 18px; padding: clamp(26px, 5vw, 44px) clamp(24px, 5vw, 48px); color: #fff; box-shadow: 0 24px 50px -24px rgba(255,95,31,.7); position: relative; overflow: hidden; max-width: 900px; }
+.qcard::before { content: "“"; position: absolute; right: 18px; top: -40px; font: 600 220px/1 var(--serif); color: rgba(255,255,255,.18); }
+.qcard blockquote { margin: 0; font: 600 calc(clamp(21px, 2.6vw, 28px) * var(--fz))/1.4 var(--serif); position: relative; }
+.qcard figcaption { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.qcard figcaption b { font: 600 26px var(--hand); }
+.qcard figcaption span { font-size: 14px; opacity: .85; font-style: italic; }
+.qrow { margin-top: 14px; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 560px) { .qrow .btn { flex: 1 1 auto; justify-content: center; } }
+.qrow .btn { min-height: 46px; }

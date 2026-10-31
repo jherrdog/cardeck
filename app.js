@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.2.2';
+const VERSION = '1.3.0';
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
@@ -735,6 +735,7 @@ function renderDesk(el) {
     </section>
     ${otd.length ? `<section class="desk-section"><div class="section-head"><h2>${otdLabel}</h2><p>${fmtDate(today(), true).replace(/,? \d{4}$/, '')}, in years past</p></div><div class="strip">${otd.map(c => tileHTML(c)).join('')}</div></section>` : ''}
     ${recent.length ? `<section class="desk-section"><div class="section-head"><h2>Recently edited</h2><p>On this device</p></div><div class="strip">${recent.map(c => tileHTML(c)).join('')}</div></section>` : ''}
+    ${quoteHTML()}
     ${(() => { const st = [...S.cards.values()].filter(isStarred).sort((x, y) => (y.edited || 0) - (x.edited || 0)).slice(0, 12); return st.length ? `<section class="desk-section"><div class="section-head"><h2>Starred</h2><p><a class="crumb" href="#/starred">See all</a></p></div><div class="strip">${st.map(c => tileHTML(c)).join('')}</div></section>` : ''; })()}
     ${S.books.size ? `<section class="desk-section"><div class="section-head"><h2>On the floor</h2><p>Book ideas and sermon series you’re arranging</p></div><div class="covers covers-strip">${sortedBooks().slice(0, 8).map(coverHTML).join('')}</div></section>` : ''}
     <section class="desk-section"><div class="section-head"><h2>Your boxes</h2><p>Pick one and flip through it.</p></div>
@@ -1467,6 +1468,153 @@ function bindCoach() {
   document.addEventListener('click', e => { if (!S.coach || !S.coach.open) return; const sec = e.target.closest('.chapter[data-ch]'); if (sec && !e.target.closest('.tile,[data-btmenu],[data-chmenu]')) focusChapter(+sec.dataset.ch); });
 }
 
+/* ---------------- daily quote for sharing ----------------
+   Only quotes with a solid source (a book, a speech, a verse), so nothing you post is misattributed. */
+const QUOTES = [
+  ['Darkness cannot drive out darkness; only light can do that. Hate cannot drive out hate; only love can do that.', 'Martin Luther King Jr.', 'Strength to Love, 1963'],
+  ['The time is always right to do what is right.', 'Martin Luther King Jr.', 'Oberlin College, 1964'],
+  ['Life’s most persistent and urgent question is, “What are you doing for others?”', 'Martin Luther King Jr.', 'Montgomery, 1957'],
+  ['Only when it is dark enough can you see the stars.', 'Martin Luther King Jr.', 'I’ve Been to the Mountaintop, 1968'],
+  ['The credit belongs to the man who is actually in the arena.', 'Theodore Roosevelt', 'Citizenship in a Republic, 1910'],
+  ['Do what you can, with what you have, where you are.', 'Theodore Roosevelt', 'quoting Squire Bill Widener, Autobiography'],
+  ['With malice toward none, with charity for all, with firmness in the right as God gives us to see the right, let us strive on to finish the work we are in.', 'Abraham Lincoln', 'Second Inaugural Address, 1865'],
+  ['Never give in, never give in, never, never, never, never—in nothing, great or small, large or petty—never give in except to convictions of honour and good sense.', 'Winston Churchill', 'Harrow School, 1941'],
+  ['I believe in Christianity as I believe that the sun has risen: not only because I see it, but because by it I see everything else.', 'C.S. Lewis', 'Is Theology Poetry?'],
+  ['To love at all is to be vulnerable.', 'C.S. Lewis', 'The Four Loves'],
+  ['Friendship is born at the moment when one man says to another, “What! You too? I thought that no one but myself…”', 'C.S. Lewis', 'The Four Loves'],
+  ['Aim at Heaven and you will get earth “thrown in”: aim at earth and you will get neither.', 'C.S. Lewis', 'Mere Christianity'],
+  ['If I find in myself a desire which no experience in this world can satisfy, the most probable explanation is that I was made for another world.', 'C.S. Lewis', 'Mere Christianity'],
+  ['There are no ordinary people. You have never talked to a mere mortal.', 'C.S. Lewis', 'The Weight of Glory'],
+  ['Courage is not simply one of the virtues, but the form of every virtue at the testing point.', 'C.S. Lewis', 'The Screwtape Letters'],
+  ['All we have to decide is what to do with the time that is given us.', 'J.R.R. Tolkien', 'The Fellowship of the Ring'],
+  ['Not all those who wander are lost.', 'J.R.R. Tolkien', 'The Fellowship of the Ring'],
+  ['The Christian ideal has not been tried and found wanting. It has been found difficult; and left untried.', 'G.K. Chesterton', 'What’s Wrong with the World'],
+  ['Cheap grace is grace without discipleship, grace without the cross, grace without Jesus Christ, living and incarnate.', 'Dietrich Bonhoeffer', 'The Cost of Discipleship'],
+  ['The first service that one owes to others in the fellowship consists in listening to them.', 'Dietrich Bonhoeffer', 'Life Together'],
+  ['We must learn to regard people less in the light of what they do or omit to do, and more in the light of what they suffer.', 'Dietrich Bonhoeffer', 'Letters and Papers from Prison'],
+  ['The greatest trap in our life is not success, popularity, or power, but self-rejection.', 'Henri Nouwen', 'Life of the Beloved'],
+  ['Being the Beloved expresses the core truth of our existence.', 'Henri Nouwen', 'Life of the Beloved'],
+  ['Joy does not simply happen to us. We have to choose joy and keep choosing it every day.', 'Henri Nouwen', 'Here and Now'],
+  ['My deepest awareness of myself is that I am deeply loved by Jesus Christ and I have done nothing to earn it or deserve it.', 'Brennan Manning', 'Abba’s Child'],
+  ['Grace is not opposed to effort, it is opposed to earning.', 'Dallas Willard', 'The Great Omission'],
+  ['To be loved but not known is comforting but superficial. To be known and not loved is our greatest fear. But to be fully known and truly loved is, well, a lot like being loved by God.', 'Timothy Keller', 'The Meaning of Marriage'],
+  ['We are more sinful and flawed in ourselves than we ever dared believe, yet at the very same time we are more loved and accepted in Jesus Christ than we ever dared hope.', 'Timothy Keller', 'The Meaning of Marriage'],
+  ['What comes into our minds when we think about God is the most important thing about us.', 'A.W. Tozer', 'The Knowledge of the Holy'],
+  ['You have made us for yourself, O Lord, and our heart is restless until it rests in you.', 'Augustine', 'Confessions'],
+  ['Love, and do what you will.', 'Augustine', 'Homilies on the First Epistle of John'],
+  ['The glory of God is a human being fully alive.', 'Irenaeus', 'Against Heresies'],
+  ['The heart has its reasons which reason knows nothing of.', 'Blaise Pascal', 'Pensées'],
+  ['Life can only be understood backwards; but it must be lived forwards.', 'Søren Kierkegaard', 'Journals, 1843'],
+  ['Attention is the rarest and purest form of generosity.', 'Simone Weil', 'letter to Joë Bousquet, 1942'],
+  ['Let nothing disturb you, let nothing frighten you. All things are passing away: God never changes.', 'Teresa of Ávila', 'her bookmark prayer'],
+  ['All shall be well, and all shall be well, and all manner of thing shall be well.', 'Julian of Norwich', 'Revelations of Divine Love'],
+  ['There is no pit so deep that He is not deeper still.', 'Betsie ten Boom', 'The Hiding Place'],
+  ['He is no fool who gives what he cannot keep to gain what he cannot lose.', 'Jim Elliot', 'journal, 1949'],
+  ['Everything can be taken from a man but one thing: the last of the human freedoms—to choose one’s attitude in any given set of circumstances.', 'Viktor Frankl', 'Man’s Search for Meaning'],
+  ['Waste no more time arguing about what a good man should be. Be one.', 'Marcus Aurelius', 'Meditations'],
+  ['The impediment to action advances action. What stands in the way becomes the way.', 'Marcus Aurelius', 'Meditations'],
+  ['The best revenge is not to be like your enemy.', 'Marcus Aurelius', 'Meditations'],
+  ['We suffer more often in imagination than in reality.', 'Seneca', 'Letters to Lucilius'],
+  ['No man is free who is not master of himself.', 'Epictetus', 'Fragments'],
+  ['Well done is better than well said.', 'Benjamin Franklin', 'Poor Richard’s Almanack'],
+  ['Make each day your masterpiece.', 'John Wooden', 'from his father’s seven-point creed'],
+  ['Be quick, but don’t hurry.', 'John Wooden', 'Wooden on Leadership'],
+  ['Your time is limited, so don’t waste it living someone else’s life.', 'Steve Jobs', 'Stanford, 2005'],
+  ['The greatest thing a human soul ever does in this world is to see something, and tell what it saw in a plain way.', 'John Ruskin', 'Modern Painters'],
+  ['There’s no person in the whole world like you, and I like you just the way you are.', 'Fred Rogers', 'Mister Rogers’ Neighborhood'],
+  ['Look for the helpers. You will always find people who are helping.', 'Fred Rogers', 'quoting his mother'],
+  ['Your direction, not your intention, determines your destination.', 'Andy Stanley', 'The Principle of the Path'],
+  ['Vulnerability is the birthplace of love, belonging, joy, courage, empathy, and creativity.', 'Brené Brown', 'Daring Greatly'],
+  ['Come to me, all you who are weary and burdened, and I will give you rest.', 'Jesus', 'Matthew 11:28'],
+  ['Do not worry about tomorrow, for tomorrow will worry about itself.', 'Jesus', 'Matthew 6:34'],
+  ['Love your neighbor as yourself.', 'Jesus', 'Mark 12:31'],
+  ['I have come that they may have life, and have it to the full.', 'Jesus', 'John 10:10'],
+  ['In this world you will have trouble. But take heart! I have overcome the world.', 'Jesus', 'John 16:33'],
+  ['Peace I leave with you; my peace I give you.', 'Jesus', 'John 14:27'],
+  ['Martha, Martha, you are worried and upset about many things, but few things are needed—or indeed only one.', 'Jesus', 'Luke 10:41–42'],
+  ['Rejoice that your names are written in heaven.', 'Jesus', 'Luke 10:20'],
+  ['I am the way and the truth and the life.', 'Jesus', 'John 14:6'],
+  ['And now these three remain: faith, hope and love. But the greatest of these is love.', 'Paul', '1 Corinthians 13:13'],
+  ['Love is patient, love is kind.', 'Paul', '1 Corinthians 13:4'],
+  ['It is for freedom that Christ has set us free.', 'Paul', 'Galatians 5:1'],
+  ['Let us not become weary in doing good, for at the proper time we will reap a harvest if we do not give up.', 'Paul', 'Galatians 6:9'],
+  ['If anyone is in Christ, the new creation has come: The old has gone, the new is here!', 'Paul', '2 Corinthians 5:17'],
+  ['For we are God’s handiwork, created in Christ Jesus to do good works.', 'Paul', 'Ephesians 2:10'],
+  ['Do not be anxious about anything, but in every situation, by prayer and petition, with thanksgiving, present your requests to God.', 'Paul', 'Philippians 4:6'],
+  ['I can do all this through him who gives me strength.', 'Paul', 'Philippians 4:13'],
+  ['There is no fear in love. But perfect love drives out fear.', 'John', '1 John 4:18'],
+  ['We love because he first loved us.', 'John', '1 John 4:19'],
+  ['He must become greater; I must become less.', 'John the Baptist', 'John 3:30'],
+  ['Be strong and courageous. Do not be afraid; do not be discouraged, for the Lord your God will be with you wherever you go.', 'Joshua 1:9', ''],
+  ['The Lord is my shepherd, I lack nothing.', 'David', 'Psalm 23:1'],
+  ['Be still, and know that I am God.', 'Psalm 46:10', ''],
+  ['Trust in the Lord with all your heart and lean not on your own understanding.', 'Solomon', 'Proverbs 3:5'],
+  ['Children’s children are a crown to the aged, and parents are the pride of their children.', 'Solomon', 'Proverbs 17:6'],
+  ['Those who hope in the Lord will renew their strength. They will soar on wings like eagles.', 'Isaiah', 'Isaiah 40:31'],
+  ['Do not fear, for I have redeemed you; I have called you by name; you are mine.', 'Isaiah', 'Isaiah 43:1'],
+  ['For I know the plans I have for you, declares the Lord, plans to prosper you and not to harm you, plans to give you hope and a future.', 'Jeremiah', 'Jeremiah 29:11'],
+  ['Because of the Lord’s great love we are not consumed, for his compassions never fail. They are new every morning.', 'Lamentations 3:22–23', ''],
+  ['He has shown you, O mortal, what is good. And what does the Lord require of you? To act justly and to love mercy and to walk humbly with your God.', 'Micah', 'Micah 6:8'],
+];
+function quoteFor(day) { return QUOTES[(day % QUOTES.length + QUOTES.length) % QUOTES.length]; }
+function dayIndex() { const d = new Date(); return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 864e5); }
+function curQuote() { return quoteFor(dayIndex() + (S.quoteShift || 0)); }
+function quoteText(q) { return `“${q[0]}”\n— ${q[1]}${q[2] ? `, ${q[2]}` : ''}`; }
+function quoteHTML() {
+  const q = curQuote();
+  return `<section class="desk-section qotd"><div class="section-head"><h2>Today’s quote</h2><p>Ready to post</p></div>
+    <figure class="qcard"><blockquote>${esc(q[0])}</blockquote><figcaption><b>${esc(q[1])}</b>${q[2] ? `<span>${esc(q[2])}</span>` : ''}</figcaption></figure>
+    <div class="row qrow"><button class="btn btn-primary" data-act="q-share">${icon('share')}Share to Facebook</button><button class="btn" data-act="q-copy">Copy text</button><button class="btn" data-act="q-image">${icon('doc')}Quote image</button><button class="btn btn-quiet" data-act="q-next">${icon('shuffle')}Another</button><button class="btn btn-quiet" data-act="q-save">Save as card</button></div></section>`;
+}
+function wrapLines(ctx, text, maxW) {
+  const words = text.split(/\s+/), lines = []; let line = '';
+  for (const w of words) { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > maxW && line) { lines.push(line); line = w; } else line = t; }
+  if (line) lines.push(line); return lines;
+}
+async function quoteImage(q) {
+  try { await document.fonts.load('600 60px "Source Serif 4"'); await document.fonts.load('600 60px "Caveat"'); } catch (_) { }
+  const W = 1080, H = 1350, c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d');
+  const g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#ff9a46'); g.addColorStop(.45, '#ff5f1f'); g.addColorStop(1, '#c93a05'); x.fillStyle = g; x.fillRect(0, 0, W, H);
+  const r = x.createRadialGradient(W * .5, H * .38, 10, W * .5, H * .38, W * .8); r.addColorStop(0, 'rgba(255,240,210,.35)'); r.addColorStop(1, 'rgba(255,240,210,0)'); x.fillStyle = r; x.fillRect(0, 0, W, H);
+  x.save(); x.translate(W / 2, H / 2 + 10); x.rotate(-.025);
+  const cw = 900, ch = 1060; x.shadowColor = 'rgba(90,20,0,.45)'; x.shadowBlur = 60; x.shadowOffsetY = 26; x.fillStyle = '#fff';
+  x.beginPath(); x.roundRect(-cw / 2, -ch / 2, cw, ch, 22); x.fill(); x.shadowColor = 'transparent';
+  x.fillStyle = '#ff5f1f'; x.fillRect(-cw / 2, -ch / 2 + 150, cw, 8);
+  x.strokeStyle = '#ffd9c4'; x.lineWidth = 3; for (let y = -ch / 2 + 230; y < ch / 2 - 40; y += 70) { x.beginPath(); x.moveTo(-cw / 2, y); x.lineTo(cw / 2, y); x.stroke(); }
+  x.fillStyle = '#ff5f1f'; x.font = '600 190px "Source Serif 4", Georgia, serif'; x.textAlign = 'left'; x.fillText('“', -cw / 2 + 60, -ch / 2 + 150);
+  let size = 92; let lines; const top = -ch / 2 + 200, bottom = ch / 2 - 190;
+  for (; size >= 34; size -= 2) { x.font = `600 ${size}px "Source Serif 4", Georgia, serif`; lines = wrapLines(x, q[0], cw - 140); if (lines.length * size * 1.3 < bottom - top) break; }
+  x.fillStyle = '#1b2233'; x.textAlign = 'left'; const lh = size * 1.3; let y = top + ((bottom - top) - lines.length * lh) / 2 + size * .2;
+  for (const l of lines) { y += lh; x.fillText(l, -cw / 2 + 70, y); }
+  x.fillStyle = '#ff5f1f'; x.font = '600 58px "Caveat", cursive'; x.fillText('— ' + q[1], -cw / 2 + 70, ch / 2 - 120);
+  if (q[2]) { x.fillStyle = '#6b7486'; x.font = 'italic 400 30px "Source Serif 4", Georgia, serif'; x.fillText(q[2], -cw / 2 + 74, ch / 2 - 62); }
+  x.restore();
+  return new Promise(res => c.toBlob(res, 'image/png'));
+}
+async function quoteAct(act) {
+  const q = curQuote(), text = quoteText(q);
+  if (act === 'q-next') { S.quoteShift = (S.quoteShift || 0) + 1; const s = $('.qotd'); if (s) s.outerHTML = quoteHTML(); return; }
+  if (act === 'q-copy') { try { await navigator.clipboard.writeText(text); toast('Copied. Paste it into Facebook.'); } catch (_) { toast('Copy isn’t allowed here.'); } return; }
+  if (act === 'q-save') {
+    const exists = [...S.cards.values()].some(c => c.body.includes(q[0].slice(0, 40)));
+    if (exists) { toast('That quote is already in your deck.'); return; }
+    await saveCard({ title: q[0].split(/[.;:!?—]/)[0].slice(0, 70), box: '', also: [], type: 'quote', quoted: [q[1]], source: q[2] || '', date: today(), projects: [], body: `“${q[0]}”` }, null);
+    toast('Saved to your Inbox'); renderNav(); return;
+  }
+  if (act === 'q-image' || act === 'q-share') {
+    let file = null;
+    if (act === 'q-image' || navigator.canShare) { const blob = await quoteImage(q); file = new File([blob], 'quote.png', { type: 'image/png' }); }
+    if (act === 'q-share' && navigator.share) {
+      try { await navigator.clipboard.writeText(text); } catch (_) { }
+      try { if (file && navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], text }); else await navigator.share({ text }); return; }
+      catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    if (act === 'q-share') { try { await navigator.clipboard.writeText(text); } catch (_) { } window.open('https://www.facebook.com/', '_blank', 'noopener'); toast('Quote copied. Paste it into a new Facebook post.'); return; }
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { try { await navigator.share({ files: [file] }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = 'quote.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); toast('Quote image saved');
+  }
+}
+
 /* ---------------- stars, sharing, chapter list, manuscript, shortcuts ---------------- */
 function isStarred(c) { return !!c && c.extra && String(c.extra.starred) === 'true'; }
 async function toggleStar(path) {
@@ -1974,6 +2122,7 @@ function bind() {
       case 'ms-notes': S.msNotes = !S.msNotes; render(); break;
       case 'keys': showKeys(); break;
       case 'tab-boxes': toggleDrawer(true); break;
+      case 'q-share': case 'q-copy': case 'q-image': case 'q-next': case 'q-save': quoteAct(a.dataset.act); break;
       case 'paste-link': { let t = ''; try { t = await navigator.clipboard.readText(); } catch (_) { } if (t && t.includes('connect=')) { useLink(t, $('#paste-msg')); } else { setupLink(); } break; }
       case 'dismiss-a2hs': try { localStorage.setItem('cardeck.a2hs', '1'); } catch (_) { } render(); break;
       case 'setsize': { const z = a.dataset.size; try { localStorage.setItem('cardeck.size', z); } catch (_) { } document.documentElement.dataset.size = z; $$('[data-act="setsize"]').forEach(x => x.setAttribute('aria-pressed', x === a)); break; }
