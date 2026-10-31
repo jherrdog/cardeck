@@ -700,3 +700,8 @@ mark { background: linear-gradient(transparent 12%, var(--marker) 12%, var(--mar
   .reader-inner { width: calc(100% - 12px); }
 }
 .daycard .tile-title { padding-right: 40%; }
+.choice-hot { border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent) inset; }
+.choice-hot strong { color: var(--accent); }
+.a2hs { border-style: solid; border-color: rgba(255,95,31,.5); align-items: center; }
+.a2hs > .ico { color: var(--accent); }
+.a2hs .icon-btn { margin-left: auto; }

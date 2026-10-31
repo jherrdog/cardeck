@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
@@ -304,7 +304,37 @@ const S = {
   loading: null, // {done,total,label}
 };
 function loadSettings() { try { return JSON.parse(localStorage.getItem('cardeck.settings') || 'null'); } catch (_) { return null; } }
-function saveSettings(s) { S.settings = s; if (s) localStorage.setItem('cardeck.settings', JSON.stringify(s)); else localStorage.removeItem('cardeck.settings'); S.gh = s && s.mode === 'github' ? new GitHub(s) : null; }
+/* The connection is kept in three places so the app opens connected every time:
+   localStorage, IndexedDB, and (in a browser tab) a first-party cookie. iPhone, iPad and Mac copy a site's cookies
+   into a Home Screen or Dock app at the moment it is added, so adding CARDECK from a connected Safari tab
+   gives the new app its connection without any setup. */
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const COOKIE = 'cardeck_link';
+function cookiePath() { return location.pathname.replace(/[^/]*$/, '') || '/'; }
+function writeCookie(s) {
+  try {
+    if (s && s.mode === 'github') document.cookie = `${COOKIE}=${b64urlEncode(JSON.stringify({ owner: s.owner, repo: s.repo, branch: s.branch || '', token: s.token }))}; Max-Age=31536000; Path=${cookiePath()}; SameSite=Strict${location.protocol === 'https:' ? '; Secure' : ''}`;
+    else document.cookie = `${COOKIE}=; Max-Age=0; Path=${cookiePath()}`;
+  } catch (_) { }
+}
+function readCookie() {
+  try { const m = document.cookie.split(/;\s*/).find(x => x.startsWith(COOKIE + '=')); if (!m) return null; const v = JSON.parse(b64urlDecode(m.slice(COOKIE.length + 1))); return v.owner && v.repo && v.token ? { mode: 'github', owner: v.owner, repo: v.repo, branch: v.branch || '', token: v.token } : null; } catch (_) { return null; }
+}
+function saveSettings(s) {
+  S.settings = s;
+  try { if (s) localStorage.setItem('cardeck.settings', JSON.stringify(s)); else localStorage.removeItem('cardeck.settings'); } catch (_) { }
+  try { DB.db && DB.set('settings', s || null).catch(() => { }); } catch (_) { }
+  if (!isStandalone() || !s) writeCookie(s);
+  S.gh = s && s.mode === 'github' ? new GitHub(s) : null;
+}
+async function restoreSettings() {
+  let s = loadSettings(), from = 'local';
+  if (!s) { try { s = await DB.get('settings'); from = 'db'; } catch (_) { s = null; } }
+  if (!s) { s = readCookie(); from = 'cookie'; }
+  if (s) { saveSettings(s); if (from !== 'local') S.restored = from; }
+  try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (_) { }
+  return s;
+}
 
 function allBoxes() {
   const names = new Set(S.boxes.map(b => b.name)); const extra = [];
@@ -698,6 +728,7 @@ function renderDesk(el) {
         <h2>${greet}. Here’s a card from ${esc(b ? b.name : 'your deck')}.</h2>
         <p>${dc && dc.date ? `You wrote it ${fmtDate(dc.date, true)}.` : ''} ${num(cn.total)} cards in ${num(cn.box.size)} boxes are on your desk.</p>
         <div class="row"><button class="btn" data-act="reroll">${icon('shuffle')}Draw another</button>${dc ? `<button class="btn btn-quiet" data-open="${esc(dc.path)}">Read it</button>` : ''}</div>
+        ${S.gh && !isStandalone() && /iPhone|iPad|Macintosh/.test(navigator.userAgent) && !localStorage.getItem('cardeck.a2hs') ? `<div class="inbox-note a2hs">${icon('share')}<span><b>Make it an app.</b> ${/iPhone|iPad/.test(navigator.userAgent) || navigator.maxTouchPoints > 1 ? 'Tap Share, then <b>Add to Home Screen</b>.' : 'In Safari choose File → <b>Add to Dock</b>.'} It opens already connected, no setup.</span><button class="icon-btn" data-act="dismiss-a2hs" aria-label="Dismiss">${icon('x')}</button></div>` : ''}
         ${S.books.size ? `<button class="inbox-note coach-note" data-act="coach">${icon('spark')}<span><b>Writing coach.</b> Pick up where you left off in ${esc((coachBook() || {}).title || 'your book')}.</span></button>` : ''}
         ${cn.inbox ? `<button class="inbox-note" data-go="#/inbox">${icon('inbox')}<span><b>${num(cn.inbox)} ${cn.inbox === 1 ? 'card is' : 'cards are'} waiting in your Inbox.</b> File them when you’re ready.</span></button>` : ''}
       </div>
@@ -1608,6 +1639,8 @@ function setupHome() {
   openPanel(`${panelHead('Set up CARDECK')}
     <p class="muted">Your cards are plain Markdown files in a private GitHub repository that only you can see. This app keeps a copy on each device, so cards open instantly and work offline. It’s free.</p>
     <h3>How do you want to start?</h3>
+    <button class="choice choice-hot" data-act="paste-link"><strong>Paste my link</strong><span>Already using CARDECK on your Mac? There: Settings → Add another device → Copy. Send it to yourself, copy it here, then tap this.</span></button>
+    <p class="muted" id="paste-msg" role="alert"></p>
     <button class="choice" data-act="setup-github"><strong>Connect my GitHub repository</strong><span>Recommended. Your cards sync across Firefox, iPhone and iPad.</span></button>
     <button class="choice" data-act="setup-link"><strong>I have a link from my other device</strong><span>Fastest way to set up your iPhone or iPad after your computer is connected.</span></button>
     <button class="choice" data-act="setup-local"><strong>Just this device for now</strong><span>Cards stay in this browser only. You can connect GitHub later.</span></button>`);
@@ -1941,6 +1974,8 @@ function bind() {
       case 'ms-notes': S.msNotes = !S.msNotes; render(); break;
       case 'keys': showKeys(); break;
       case 'tab-boxes': toggleDrawer(true); break;
+      case 'paste-link': { let t = ''; try { t = await navigator.clipboard.readText(); } catch (_) { } if (t && t.includes('connect=')) { useLink(t, $('#paste-msg')); } else { setupLink(); } break; }
+      case 'dismiss-a2hs': try { localStorage.setItem('cardeck.a2hs', '1'); } catch (_) { } render(); break;
       case 'setsize': { const z = a.dataset.size; try { localStorage.setItem('cardeck.size', z); } catch (_) { } document.documentElement.dataset.size = z; $$('[data-act="setsize"]').forEach(x => x.setAttribute('aria-pressed', x === a)); break; }
       case 'close': closeReader(); break;
       case 'prev': { const n = neighbors().prev; n && openReader(n, { replace: true }); break; }
@@ -2034,7 +2069,7 @@ function bind() {
 async function boot() {
   bind();
   try { await DB.open(); } catch (e) { view().innerHTML = `<div class="empty"><h3>This browser is blocking storage</h3><p>CARDECK keeps your cards on this device. Turn off private browsing, or allow site data for this page, then reload.</p></div>`; return; }
-  saveSettings(loadSettings());
+  await restoreSettings();
   try { S.compact = !!localStorage.getItem('cardeck.compact'); } catch (_) { }
   await loadLocal();
   syncIdle();
