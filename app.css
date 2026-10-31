@@ -326,7 +326,7 @@ mark { background: linear-gradient(transparent 12%, var(--marker) 12%, var(--mar
 .field span { display: block; font-size: 13.5px; color: var(--sheet-muted); margin-bottom: 6px; }
 .field input { width: 100%; height: 44px; border-radius: 9px; border: 1px solid var(--sheet-line); background: var(--field); color: var(--field-text); padding: 0 12px; font-size: 16px; }
 .field input:focus { outline: none; border-color: #6d9cff; box-shadow: 0 0 0 3px rgba(109,156,255,.25); }
-.pbtn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 42px; padding: 0 16px; border-radius: 9px; border: 1px solid var(--sheet-line); background: var(--field); color: var(--sheet-text); font-weight: 560; font-size: 14.5px; text-decoration: none; }
+.pbtn { cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 42px; padding: 0 16px; border-radius: 9px; border: 1px solid var(--sheet-line); background: var(--field); color: var(--sheet-text); font-weight: 560; font-size: 14.5px; text-decoration: none; }
 .pbtn:hover { border-color: #b8c2d2; }
 .pbtn.primary { background: #1f2d44; border-color: #1f2d44; color: #fff; }
 :root[data-theme="night"] .pbtn.primary { background: #e6e9ef; border-color: #e6e9ef; color: #1b2233; }

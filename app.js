@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
 const TYPE_PLURAL = { all: 'All', idea: 'Ideas', quote: 'Quotes', story: 'Stories', fact: 'Facts', question: 'Questions' };
@@ -181,6 +181,16 @@ const DB = {
 class GitHub {
   constructor(s) { this.s = s; this.base = `https://api.github.com/repos/${encodeURIComponent(s.owner)}/${encodeURIComponent(s.repo)}`; }
   async req(method, path, body, opts = {}) {
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.once(method, path, body, opts); }
+      catch (e) {
+        const busy = e.offline || e.status >= 500 || e.status === 429 || (e.status === 403 && /rate limit/i.test(e.message));
+        if (!busy || attempt >= 3 || (e.offline && !navigator.onLine)) throw e;
+        await sleep(e.retryAfter ? e.retryAfter * 1000 : 1500 * (attempt + 1) ** 2);
+      }
+    }
+  }
+  async once(method, path, body, opts) {
     let res;
     try {
       res = await fetch(path.startsWith('http') ? path : this.base + path, {
@@ -192,7 +202,8 @@ class GitHub {
     if (!res.ok) {
       if ((opts.allow || []).includes(res.status)) return null;
       let msg = ''; try { msg = (await res.json()).message || ''; } catch (_) { }
-      const err = new Error(msg || res.statusText || `GitHub error ${res.status}`); err.status = res.status; throw err;
+      const err = new Error(msg || res.statusText || `GitHub error ${res.status}`); err.status = res.status;
+      const ra = +res.headers.get('retry-after'); if (ra) err.retryAfter = Math.min(ra, 60); throw err;
     }
     if (res.status === 204) return null;
     return opts.raw ? res.text() : res.json();
@@ -212,7 +223,8 @@ class GitHub {
   createBlob(text) { return this.req('POST', '/git/blobs', { content: b64encode(text), encoding: 'base64' }).then(r => r.sha); }
   async ensureInit() {
     let h = await this.head(); if (h) return h;
-    await this.req('PUT', '/contents/README.md', { message: 'Start CARDECK', content: b64encode('# CARDECK\n\nYour cards live here as Markdown files, one card per file, filed in folders by box.\n'), branch: this.s.branch });
+    await this.req('PUT', '/contents/README.md', { message: 'Start CARDECK', content: b64encode('# CARDECK\n\nYour cards live here as Markdown files, one card per file, filed in folders by box.\n') });
+    try { const r = await this.repo(); if (r.default_branch) this.s.branch = r.default_branch; } catch (_) { }
     for (let i = 0; i < 6 && !h; i++) { await sleep(600); h = await this.head(); }
     if (!h) throw new Error('GitHub did not finish creating the first commit. Try again in a minute.');
     return h;
@@ -220,7 +232,7 @@ class GitHub {
   async commitFiles(entries, message, onProgress) {
     const head = await this.ensureInit();
     let tree = (await this.commit(head)).tree.sha;
-    const STEP = 250;
+    const STEP = 120;
     for (let i = 0; i < entries.length; i += STEP) {
       const chunk = entries.slice(i, i + STEP).map(e => e.remove ? { path: e.path, mode: '100644', type: 'blob', sha: null }
         : e.blobSha ? { path: e.path, mode: '100644', type: 'blob', sha: e.blobSha } : { path: e.path, mode: '100644', type: 'blob', content: e.text });
@@ -293,10 +305,10 @@ async function doSync({ quiet } = {}) {
     if (head === lastHead && S.cards.size) { S.sync.last = Date.now(); await DB.set('lastSync', S.sync.last); syncIdle(); return; }
     const commit = await S.gh.commit(head);
     const tree = await S.gh.tree(commit.tree.sha);
-    const remote = new Map(); let snapSha = null, boxesSha = null;
+    const remote = new Map(); const snaps = []; let boxesSha = null;
     for (const e of tree.tree) if (e.type === 'blob') {
       if (isCardPath(e.path)) remote.set(e.path, e.sha);
-      else if (e.path === '.cardeck/snapshot.json') snapSha = e.sha;
+      else if (/^\.cardeck\/snapshot(-\d+)?\.json$/.test(e.path)) snaps.push(e);
       else if (e.path === '.cardeck/boxes.json') boxesSha = e.sha;
     }
     if (boxesSha && boxesSha !== await DB.get('boxesSha')) {
@@ -308,9 +320,10 @@ async function doSync({ quiet } = {}) {
     const gone = [...S.cards.values()].filter(c => !remote.has(c.path) && !pending.has(c.path) && c.sha).map(c => c.path);
     const changed = [];
     let snap = null;
-    if (need.length > 40 && snapSha) {
+    if (need.length > 40 && snaps.length) {
       S.loading = { done: 0, total: need.length, label: 'Downloading your cards' }; renderLoading();
-      try { snap = JSON.parse(await S.gh.blob(snapSha)); } catch (_) { snap = null; }
+      snap = { files: {} };
+      await pool(snaps, 4, async e => { try { Object.assign(snap.files, JSON.parse(await S.gh.blob(e.sha)).files || {}); } catch (_) { } });
     }
     const fetchList = [];
     for (const [p, sha] of need) {
@@ -331,7 +344,7 @@ async function doSync({ quiet } = {}) {
     S.loading = null;
     if (changed.length || gone.length) render();
     syncIdle();
-    if (fetchList.length > 150) rebuildSnapshot().catch(() => { });
+    if (fetchList.length > 150) rebuildSnapshot(snaps.map(e => e.path)).catch(() => { });
   } catch (e) {
     S.loading = null;
     if (e.offline) setSync('offline', S.outbox ? `Offline, ${S.outbox} to save` : 'Offline');
@@ -382,11 +395,20 @@ async function flush() {
 }
 async function queue(op) { await DB.addOp(op); S.outbox++; syncIdle(); if (S.gh && !syncPromise) flush(); }
 
-async function rebuildSnapshot() {
+/* Quick-start copy: every card in a few ~1 MB pieces, so a new device downloads the deck in a handful of requests. */
+async function snapshotEntries(cards, oldPaths = []) {
+  const chunks = []; let cur = {}, size = 0;
+  for (const c of cards) { if (!c.sha) continue; if (size > 900000) { chunks.push(cur); cur = {}; size = 0; } cur[c.path] = { sha: c.sha, text: c.text }; size += c.text.length + 80; }
+  if (Object.keys(cur).length) chunks.push(cur);
+  const entries = [];
+  for (let i = 0; i < chunks.length; i++) entries.push({ path: `.cardeck/snapshot-${i + 1}.json`, blobSha: await S.gh.createBlob(JSON.stringify({ format: 'cardeck-snapshot', version: 2, files: chunks[i] })) });
+  const keep = new Set(entries.map(e => e.path));
+  for (const p of oldPaths) if (!keep.has(p)) entries.push({ path: p, remove: true });
+  return entries;
+}
+async function rebuildSnapshot(oldPaths) {
   if (!S.gh) return;
-  const files = {}; for (const c of S.cards.values()) if (c.sha) files[c.path] = { sha: c.sha, text: c.text };
-  const blobSha = await S.gh.createBlob(JSON.stringify({ format: 'cardeck-snapshot', version: 1, files }));
-  await S.gh.commitFiles([{ path: '.cardeck/snapshot.json', blobSha }], 'Refresh CARDECK snapshot');
+  await S.gh.commitFiles(await snapshotEntries([...S.cards.values()], oldPaths), 'Refresh CARDECK quick-start copy');
 }
 
 /* ---------------- card operations ---------------- */
@@ -829,15 +851,16 @@ function importScreen() {
   openPanel(`${panelHead('Bring in your cards')}
     <p>${S.gh ? 'Your repository is empty.' : 'This device has no cards yet.'} Choose <b>cardeck-import.json</b>, the file that came with this app. It holds every card from your journal.</p>
     ${S.gh ? '<p class="muted">This uploads your cards to your private repository once. It takes about a minute.</p>' : ''}
-    <div class="prow"><button class="pbtn primary" data-act="pick-import">Choose file</button><button class="pbtn" data-act="skip-import">Start with an empty deck</button></div>
+    <div class="prow"><label class="pbtn primary" for="file-in" role="button" tabindex="0">Choose file</label><button class="pbtn" data-act="skip-import">Start with an empty deck</button></div>
     <div id="imp-status" hidden><div class="progress"><i id="imp-bar"></i></div><p class="muted" id="imp-msg"></p></div>`);
 }
 async function runImport(file) {
   const st = $('#imp-status'), bar = $('#imp-bar'), msg = $('#imp-msg');
   const show = (pct, t) => { if (st) { st.hidden = false; bar.style.width = pct + '%'; msg.textContent = t; } };
+  let step = 'reading the file';
   try {
     show(3, 'Reading the file…');
-    const data = JSON.parse(await file.text());
+    let data; try { data = JSON.parse(await file.text()); } catch (_) { throw new Error(`“${file.name}” isn’t the CARDECK import file. Choose cardeck-import.json.`); }
     if (data.format !== 'cardeck-import' || !Array.isArray(data.files)) throw new Error('That isn’t a CARDECK import file.');
     const cardFiles = data.files.filter(f => isCardPath(f.path));
     show(8, `Preparing ${num(cardFiles.length)} cards…`);
@@ -845,21 +868,27 @@ async function runImport(file) {
     for (const f of cardFiles) cards.push(makeCard(f.path, f.text, S.gh ? await gitSha(f.text) : null));
     S.boxes = data.boxes || []; await DB.set('boxes', S.boxes);
     if (S.gh) {
-      const files = {}; for (const c of cards) files[c.path] = { sha: c.sha, text: c.text };
-      show(12, 'Packing a quick-start copy…');
-      const snapSha = await S.gh.createBlob(JSON.stringify({ format: 'cardeck-snapshot', version: 1, files }));
+      step = 'preparing the repository'; show(10, 'Getting your repository ready…');
+      await S.gh.ensureInit();
+      step = 'packing a quick-start copy'; show(12, 'Packing a quick-start copy…');
+      let snapEntries = [];
+      try { snapEntries = await snapshotEntries(cards); } catch (e) { if (e.offline || e.status === 401) throw e; }
       const entries = data.files.filter(f => !f.path.startsWith('.cardeck/snapshot')).map(f => ({ path: f.path, text: f.text }));
       if (!entries.some(e => e.path === '.cardeck/boxes.json')) entries.push({ path: '.cardeck/boxes.json', text: JSON.stringify({ version: 1, boxes: S.boxes }, null, 1) + '\n' });
-      entries.push({ path: '.cardeck/snapshot.json', blobSha: snapSha });
+      entries.push(...snapEntries);
+      step = 'uploading your cards';
       const head = await S.gh.commitFiles(entries, `Import ${cards.length} cards`, (d, t) => show(15 + Math.round(80 * d / t), `Uploading ${num(d)} of ${num(t)} files…`));
-      await DB.set('lastHead', head);
+      await DB.set('lastHead', head); saveSettings(S.gh.s);
     }
     S.cards = new Map(cards.map(c => [c.path, c])); await DB.putCards(cards);
     show(100, 'Done.');
     S.sync.last = Date.now(); await DB.set('lastSync', S.sync.last);
     await sleep(400); closePanel(); render(); syncIdle(); toast(`${num(cards.length)} cards are on your desk.`);
   } catch (e) {
-    show(0, e.offline ? 'You went offline. Reconnect and choose the file again.' : `Import stopped: ${e.message}`);
+    const why = e.status === 401 ? 'GitHub rejected the access token. Make a new one and reconnect in Settings.'
+      : e.status === 403 || e.status === 404 ? 'The token can’t write to this repository. Give it “Contents: Read and write” for cardeck-data, then try again.'
+      : e.offline ? 'The connection dropped. Choose the file again to retry.' : e.message;
+    show(0, `Stopped while ${step}: ${why}${e.status ? ` (GitHub ${e.status})` : ''}`);
   }
 }
 async function uploadDeck() {
@@ -1091,7 +1120,7 @@ async function boot() {
   if (h.kind === 'card' || h.kind === 'new' || h.kind === 'connect') route();
   if (!S.settings && h.kind !== 'connect') setupHome();
   else if (S.gh) sync({ quiet: !!S.cards.size });
-  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) navigator.serviceWorker.register('sw.js').catch(() => { });
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) { const had = !!navigator.serviceWorker.controller; navigator.serviceWorker.addEventListener('controllerchange', () => { if (had && !S.reader && $('#panel').hidden) location.reload(); }); navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => { }); }
 }
 boot();
 })();
