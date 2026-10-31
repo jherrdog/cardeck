@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.7.1';
+const VERSION = '1.8.0';
 /* Bump when the app starts tracking a new kind of file, so every device re-reads the whole repository once. */
 const TRACK_VER = 2;
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
@@ -545,6 +545,8 @@ function parseHash() {
   if (h === 'inbox') return { kind: 'inbox' };
   if (h === 'starred') return { kind: 'starred' };
   if (h === 'devotionals') return { kind: 'devos' };
+  if (h === 'advent') return { kind: 'advent' };
+  if (/^advent\/\d{4}-\d{2}-\d{2}$/.test(h)) return { kind: 'advent', date: h.slice(7) };
   if (h.startsWith('devo/')) { const m = /^devo\/(.+)\/(\d+)$/.exec(h); if (m) return { kind: 'devo', name: m[1], n: +m[2] }; return { kind: 'devos' }; }
   if (h.startsWith('compile/book/')) return { kind: 'compile', doc: 'book', name: h.slice(13) };
   if (h.startsWith('compile/series/')) return { kind: 'compile', doc: 'series', name: h.slice(15) };
@@ -560,6 +562,7 @@ function parseHash() {
 }
 function hashFor(v) {
   if (v.kind === 'all') return '#/all'; if (v.kind === 'inbox') return '#/inbox'; if (v.kind === 'starred') return '#/starred';
+  if (v.kind === 'advent') return v.date ? '#/advent/' + v.date : '#/advent';
   if (v.kind === 'devos') return '#/devotionals'; if (v.kind === 'devo') return '#/devo/' + encodeURIComponent(v.name) + '/' + v.n;
   if (v.kind === 'compile') return `#/compile/${v.doc}/` + encodeURIComponent(v.name);
   if (v.kind === 'box') return '#/box/' + encodeURIComponent(v.name);
@@ -639,6 +642,7 @@ function renderNav() {
     <a class="nav-item" href="#/all" ${cur('all')}>${icon('stack')}All cards<span class="count">${num(cn.total)}</span></a>
     <a class="nav-item" href="#/starred" ${cur('starred')}>${icon('star')}Starred<span class="count">${num(cn.starred)}</span></a>
     ${['book', 'series'].map(d => `<a class="nav-item" href="${LEX[d].allHash}" ${(v.kind === 'books' || v.kind === 'book') && v.doc === d && !S.q ? 'aria-current="page"' : ''}>${icon(d === 'book' ? 'book' : 'pulpit')}${LEX[d].tab}<span class="count">${num(sortedBooks(d).length)}</span></a>`).join('')}
+    ${adventDoc() ? `<a class="nav-item" href="#/advent" ${v.kind === 'advent' && !S.q ? 'aria-current="page"' : ''}>${icon('candle')}Advent<span class="count">${num(adventParse(adventDoc()).days.length)}</span></a>` : ''}
     <a class="nav-item" href="#/devotionals" ${(v.kind === 'devos' || v.kind === 'devo') && !S.q ? 'aria-current="page"' : ''}>${icon('flame')}Devotionals<span class="count">${num(devoAll().length)}</span></a>`;
   $('#nav-boxes').innerHTML = `<div class="nav-head"><span>Boxes</span></div>` + allBoxes().map(b =>
     `<a class="nav-item" href="${hashFor({ kind: 'box', name: b.name })}" ${cur('box', b.name)}><span class="tab" style="--h:${b.hue}"></span>${esc(b.name)}<span class="count">${num(cn.box.get(b.name) || 0)}</span></a>`).join('');
@@ -652,8 +656,9 @@ function render() {
   if (S.coach && S.coach.open) { renderCoach(); observeChapters(); if (S.view.kind === 'book') focusChapter(S.coach.ci || 0); }
   const cb = $('#coach-btn'); if (cb) cb.setAttribute('aria-pressed', !!(S.coach && S.coach.open));
   const k = S.view.kind, d = S.view.doc;
-  const tab = k === 'desk' ? 'desk' : (k === 'devos' || k === 'devo') ? 'devos' : (k === 'books' || k === 'book' || k === 'compile') ? (d === 'series' ? 'sermons' : 'books') : 'boxes';
+  const tab = k === 'desk' ? 'desk' : k === 'advent' ? 'advent' : (k === 'devos' || k === 'devo') ? 'devos' : (k === 'books' || k === 'book' || k === 'compile') ? (d === 'series' ? 'sermons' : 'books') : 'boxes';
   $$('#tabbar [data-tab]').forEach(b => b.setAttribute('aria-current', b.dataset.tab === tab ? 'page' : 'false'));
+  { const at = $('#tabbar [data-tab="advent"]'); if (at) at.hidden = !(adventDoc() && (advSeason() || k === 'advent')); }
   document.body.dataset.view = k;
 }
 function renderMain() {
@@ -665,6 +670,7 @@ function renderMain() {
   if (toks.length) return renderSearch(el, toks);
   if (S.view.kind === 'desk') return renderDesk(el);
   if (S.view.kind === 'devos') return renderDevos(el);
+  if (S.view.kind === 'advent') return renderAdvent(el);
   if (S.view.kind === 'devo') return renderDevo(el);
   if (S.view.kind === 'books') return renderBooks(el, S.view.doc);
   if (S.view.kind === 'book') { const b = curBook(); if (b) return renderBook(el, b); return renderBooks(el, S.view.doc); }
@@ -747,6 +753,7 @@ function renderDesk(el) {
     </section>
     ${otd.length ? `<section class="desk-section"><div class="section-head"><h2>${otdLabel}</h2><p>${fmtDate(today(), true).replace(/,? \d{4}$/, '')}, in years past</p></div><div class="strip">${otd.map(c => tileHTML(c)).join('')}</div></section>` : ''}
     ${recent.length ? `<section class="desk-section"><div class="section-head"><h2>Recently edited</h2><p>On this device</p></div><div class="strip">${recent.map(c => tileHTML(c)).join('')}</div></section>` : ''}
+    ${adventDeskHTML()}
     ${devoDeskHTML()}
     ${postHTML()}
     ${quoteHTML()}
@@ -1790,7 +1797,7 @@ function devoParse(d) {
   d._parsed = { text: d.text, v: out };
   return out;
 }
-function devoCols() { return [...(S.devos ? S.devos.values() : [])].filter(d => !/## 1\. Title\n\n> \*\*Reference\*\*/.test(d.text) || (S.devoEdit === d.path)).sort((a, b) => a.title.localeCompare(b.title)).map(devoParse); }
+function devoCols() { return [...(S.devos ? S.devos.values() : [])].filter(d => !isAdventDoc(d) && !/## 1\. Title\n\n> \*\*Reference\*\*/.test(d.text) || (S.devoEdit === d.path)).sort((a, b) => a.title.localeCompare(b.title)).map(devoParse); }
 function devoAll() { return devoCols().flatMap(c => c.items.map(it => ({ col: c, it }))); }
 function devoDone() { try { return JSON.parse(localStorage.getItem('cardeck.devo') || '{}'); } catch (_) { return {}; } }
 function devoKey(col, it) { return `${col.path}#${it.n}`; }
@@ -1955,6 +1962,199 @@ async function devoAct(act, el) {
   let sx = 0, sy = 0, st = 0;
   document.addEventListener('touchstart', e => { if (S.view && S.view.kind === 'devo' && !S.reader && e.touches.length === 1 && !e.target.closest('textarea,input,button')) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; st = Date.now(); } else st = 0; }, { passive: true });
   document.addEventListener('touchend', e => { if (!st || Date.now() - st > 650) return; const t = e.changedTouches[0]; const dx = t.clientX - sx, dy = t.clientY - sy; st = 0; if (Math.abs(dx) > 80 && Math.abs(dy) < 50) devoStep(dx < 0 ? 1 : -1); }, { passive: true });
+})();
+
+/* ---------------- advent ---------------- */
+const ADV_FIELDS = [['practice', 'Practice'], ['pray', 'Pray']];
+const ADV_CANDLES = [['Hope', '#7b4bb7'], ['Peace', '#7b4bb7'], ['Joy', '#e46aa3'], ['Love', '#7b4bb7']];
+function isAdventDoc(d) { return /^type:\s*"?advent"?\s*$/m.test((/^---\n([\s\S]*?)\n---/.exec(d.text) || [, ''])[1]); }
+function adventDoc() { return [...(S.devos ? S.devos.values() : [])].filter(isAdventDoc).sort((a, b) => b.title.localeCompare(a.title))[0] || null; }
+function adventParse(d) {
+  if (d._adv && d._adv.text === d.text) return d._adv.v;
+  const { props, body } = parseFM(d.text);
+  const out = { path: d.path, title: asStr(props.title) || d.title, subtitle: asStr(props.subtitle), intro: '', guides: '', weeks: [], days: [] };
+  let week = null, day = null, sec = null; const buf = { intro: [], guides: [] };
+  const close = () => { if (day) { day.body = day.lines.join('\n').trim(); delete day.lines; } day = null; };
+  for (const raw of body.replace(/\r/g, '').split('\n')) {
+    const line = raw.replace(/\s+$/, ''); let m;
+    if ((m = /^#\s+(.+)$/.exec(line))) { close(); sec = null; week = { title: m[1].trim(), intro: [], days: [], n: out.weeks.length }; out.weeks.push(week); continue; }
+    if ((m = /^##\s+(.+)$/.exec(line))) {
+      close(); const h = m[1].trim();
+      if (/^before you begin/i.test(h)) { sec = 'intro'; continue; }
+      if (/^your guides/i.test(h)) { sec = 'guides'; continue; }
+      sec = null; const dm = /^(\d{4}-\d{2}-\d{2})\s*[·\-–—]\s*(.+)$/.exec(h);
+      if (!dm) continue;
+      if (!week) { week = { title: '', intro: [], days: [], n: 0 }; out.weeks.push(week); }
+      day = { date: dm[1], title: dm[2].trim(), ref: '', verse: '', read: '', guide: '', voice: '', voiceBy: '', practice: '', pray: '', cards: [], lines: [], week: week.title, wn: week.n };
+      week.days.push(day); out.days.push(day); continue;
+    }
+    if (sec) { buf[sec].push(line); continue; }
+    if (!day) { if (week) week.intro.push(line); continue; }
+    if ((m = /^>\s*\*\*(.+?)\*\*\s*(.*)$/.exec(line))) { day.ref = m[1].trim(); day.verse = m[2].trim().replace(/^["“]|["”]$/g, ''); continue; }
+    if ((m = /^\*\*Read:?\*\*:?\s*(.+)$/i.exec(line))) { day.read = m[1].trim(); continue; }
+    if ((m = /^\*\*Guide:?\*\*:?\s*(.+)$/i.exec(line))) { day.guide = m[1].trim(); continue; }
+    if ((m = /^\*\*Voice:?\*\*:?\s*(.+)$/i.exec(line))) { const v = m[1].trim(); const k = v.lastIndexOf(' — '); day.voice = (k > 0 ? v.slice(0, k).trim() : v).replace(/^"([\s\S]*)"$/, '“$1”'); day.voiceBy = k > 0 ? v.slice(k + 3).trim() : ''; continue; }
+    const f = ADV_FIELDS.find(([, l]) => new RegExp('^\\*\\*' + l + ':?\\*\\*', 'i').test(line));
+    if (f) { day[f[0]] = line.replace(/^\*\*[^*]+\*\*:?\s*/, '').trim(); continue; }
+    if (/^\*From your cards:\*/.test(line)) { day.cards = [...line.matchAll(/\[\[([^\]]+)\]\]/g)].map(x => x[1] + '.md'); continue; }
+    day.lines.push(line);
+  }
+  close();
+  out.intro = buf.intro.join('\n').trim(); out.guides = buf.guides.join('\n').trim();
+  out.weeks.forEach(w => { w.intro = w.intro.join('\n').trim(); });
+  out.days.forEach((x, i) => { x.n = i + 1; x.words = ((x.body + ' ' + x.voice + ' ' + x.practice + ' ' + x.pray).match(/\S+/g) || []).length; });
+  d._adv = { text: d.text, v: out };
+  return out;
+}
+const advDate = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const advFmt = (s, o = { weekday: 'long', month: 'long', day: 'numeric' }) => advDate(s).toLocaleDateString(undefined, o);
+function advToday() { return today(); }
+function advState(a) {
+  const t = advToday(); if (!a.days.length) return { phase: 'none' };
+  const first = a.days[0].date, last = a.days[a.days.length - 1].date;
+  if (t < first) return { phase: 'before', daysTo: Math.round((advDate(first) - advDate(t)) / 864e5), lit: 0 };
+  const day = a.days.find(x => x.date === t);
+  if (day) return { phase: 'during', day, lit: day.date >= last ? 5 : day.wn + 1 };
+  return { phase: 'after', lit: 5, day: a.days[a.days.length - 1] };
+}
+function advSeason() { const t = advToday(); const md = t.slice(5); return md >= '10-15' || md <= '01-06'; }
+function advKey(a, x) { return `${a.path}#${x.date}`; }
+function advHash(x) { return '#/advent/' + x.date; }
+function wreathSVG(lit, size = 180) {
+  const order = [0, 1, 3, 2]; const pos = [[46, 70], [134, 70], [158, 112], [22, 112]];
+  const leaves = Array.from({ length: 22 }, (_, i) => { const a = i / 22 * Math.PI * 2; const x = 90 + Math.cos(a) * 74, y = 122 + Math.sin(a) * 26; return `<ellipse cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" rx="14" ry="6" transform="rotate(${(a * 180 / Math.PI + 90).toFixed(0)} ${x.toFixed(1)} ${y.toFixed(1)})" fill="${i % 2 ? '#2f6b45' : '#24563a'}"/>`; }).join('');
+  const berries = Array.from({ length: 8 }, (_, i) => { const a = (i + .5) / 8 * Math.PI * 2; return `<circle cx="${(90 + Math.cos(a) * 70).toFixed(1)}" cy="${(122 + Math.sin(a) * 24).toFixed(1)}" r="3.4" fill="#d9322b"/>`; }).join('');
+  const candle = (i, x, base, h, color, on) => `<g class="cdl${on ? ' on' : ''}"><rect x="${x - 7}" y="${base - h}" width="14" height="${h}" rx="3" fill="${color}"/><rect x="${x - 7}" y="${base - h}" width="5" height="${h}" rx="2" fill="#fff" opacity=".18"/><line x1="${x}" y1="${base - h}" x2="${x}" y2="${base - h - 6}" stroke="#3a2a1a" stroke-width="1.6"/>${on ? `<g class="flame"><ellipse cx="${x}" cy="${base - h - 13}" rx="9" ry="14" fill="#ffb347" opacity=".25"/><path d="M${x} ${base - h - 26} C ${x + 7} ${base - h - 15}, ${x + 5} ${base - h - 6}, ${x} ${base - h - 5} C ${x - 5} ${base - h - 6}, ${x - 7} ${base - h - 15}, ${x} ${base - h - 26} Z" fill="#ff8a1f"/><path d="M${x} ${base - h - 19} C ${x + 3} ${base - h - 13}, ${x + 2} ${base - h - 8}, ${x} ${base - h - 7} C ${x - 2} ${base - h - 8}, ${x - 3} ${base - h - 13}, ${x} ${base - h - 19} Z" fill="#fff3c4"/></g>` : ''}</g>`;
+  const back = order.slice(0, 2).map(i => candle(i, pos[i][0], pos[i][1] + 40, 52, ADV_CANDLES[i][1], lit > i)).join('');
+  const front = order.slice(2).map(i => candle(i, pos[i][0], pos[i][1] + 22, 52, ADV_CANDLES[i][1], lit > i)).join('');
+  return `<svg class="wreath" viewBox="0 0 180 180" width="${size}" height="${size}" role="img" aria-label="Advent wreath, ${Math.min(lit, 4)} of 4 candles lit${lit > 4 ? ' and the Christ candle' : ''}">
+    <ellipse cx="90" cy="124" rx="86" ry="32" fill="#000" opacity=".25"/>
+    ${back}${candle(4, 90, 118, 66, '#f7f2e6', lit > 4)}${leaves}${berries}${front}</svg>`;
+}
+function adventDeskHTML() {
+  const d = adventDoc(); if (!d || !advSeason()) return '';
+  const a = adventParse(d); const st = advState(a);
+  if (st.phase === 'none') return '';
+  const x = st.phase === 'before' ? a.days[0] : st.day;
+  const top = st.phase === 'before' ? `Advent begins ${advFmt(a.days[0].date, { weekday: 'long', month: 'long', day: 'numeric' })} · ${st.daysTo === 1 ? 'tomorrow' : `in ${st.daysTo} days`}`
+    : st.phase === 'during' ? `${advFmt(x.date)} · Day ${x.n} of ${a.days.length}` : 'Christmastide';
+  return `<section class="desk-section adv-desk"><div class="section-head"><h2>Advent</h2><p><a class="crumb" href="#/advent">The whole walk</a></p></div>
+    <a class="adv-hero" href="${st.phase === 'before' ? '#/advent' : advHash(x)}">
+      <span class="adv-hero-wreath">${wreathSVG(st.lit, 120)}</span>
+      <span class="adv-hero-text"><span class="adv-hero-top">${esc(top)}</span>
+      <span class="adv-hero-title">${esc(st.phase === 'before' ? a.title : x.title)}</span>
+      <span class="adv-hero-sub">${esc(st.phase === 'before' ? a.subtitle : `${x.week}${x.guide ? ' · with ' + x.guide : ''}`)}</span>
+      <span class="adv-hero-go">${st.phase === 'before' ? 'Take the first step' : 'Walk today'}</span></span>
+    </a></section>`;
+}
+function renderAdvent(el) {
+  const d = adventDoc(); S.list = [];
+  if (!d) { el.innerHTML = `<div class="view-head"><div><h1 class="view-title">Advent</h1></div></div><div class="empty"><h3>No Advent walk yet</h3><p>Sync to bring it down, or add a file to the Devotionals folder with <code>type: advent</code>.</p></div>`; return; }
+  const a = adventParse(d); const st = advState(a); const done = devoDone(); const t = advToday();
+  if (S.view.date) return renderAdventDay(el, a, st);
+  const doneN = a.days.filter(x => done[advKey(a, x)]).length;
+  const status = st.phase === 'before' ? `Begins ${advFmt(a.days[0].date)} · ${st.daysTo === 1 ? 'tomorrow' : `${st.daysTo} days to go`}`
+    : st.phase === 'during' ? `Day ${st.day.n} of ${a.days.length} · ${st.day.week}` : 'Merry Christmas. The walk is complete.';
+  const primary = st.phase === 'during' ? `<a class="btn btn-primary" href="${advHash(st.day)}">${icon('flame')}Walk today</a>` : `<a class="btn btn-primary" href="${advHash(a.days[0])}">${icon('flame')}${st.phase === 'before' ? 'Preview day 1' : 'Start from day 1'}</a>`;
+  el.innerHTML = `<div class="adv">
+    <header class="adv-head">
+      <div class="adv-head-wreath">${wreathSVG(st.lit, 220)}</div>
+      <div class="adv-head-text">
+        <p class="adv-eyebrow">Advent ${esc(a.days[0].date.slice(0, 4))}</p>
+        <h1 class="adv-title">${esc(a.title)}</h1>
+        ${a.subtitle ? `<p class="adv-sub">${esc(a.subtitle)}</p>` : ''}
+        <p class="adv-status">${esc(status)}${doneN ? ` · ${doneN} walked` : ''}</p>
+        <div class="row adv-actions">${primary}<button class="btn" data-act="adv-intro">Before you begin</button><button class="btn btn-quiet" data-act="devo-edit" data-path="${esc(a.path)}">${icon('pen')}Edit</button><button class="btn btn-quiet" data-act="print">Print</button></div>
+      </div>
+    </header>
+    <section class="adv-cal" aria-label="Advent calendar">
+      ${a.weeks.map(w => `<div class="adv-week" style="--cdl:${(ADV_CANDLES[w.n] || ['', '#f1c75b'])[1]}">
+        <div class="adv-week-head"><span class="adv-cdl"></span><h2>${esc(w.title)}</h2></div>
+        ${w.intro ? `<div class="adv-week-intro">${renderMd(w.intro)}</div>` : ''}
+        <div class="adv-days">${w.days.map(x => { const isT = x.date === t, past = x.date < t, isD = !!done[advKey(a, x)]; const dt = advDate(x.date);
+          return `<a class="adv-day${isT ? ' is-today' : ''}${past ? ' is-past' : ''}${isD ? ' is-done' : ''}${x.date.endsWith('12-25') ? ' is-xmas' : ''}" href="${advHash(x)}">
+            <span class="adv-dow">${dt.toLocaleDateString(undefined, { weekday: 'short' })}</span>
+            <span class="adv-dnum">${dt.getDate()}</span>
+            <span class="adv-dtitle">${esc(x.title)}</span>
+            ${x.guide ? `<span class="adv-dguide">${esc(x.guide)}</span>` : ''}
+            ${isD ? `<span class="adv-check">${icon('check')}</span>` : ''}${isT ? '<span class="adv-flag">Today</span>' : ''}</a>`; }).join('')}</div></div>`).join('')}
+    </section>
+    <section class="adv-letter" id="adv-intro"><h2>Before you begin</h2>${renderMd(a.intro)}</section>
+    ${a.guides ? `<details class="adv-guides"><summary>Your guides</summary>${renderMd(a.guides)}</details>` : ''}
+    <article class="manuscript adv-print">${a.days.map(x => advBodyHTML(a, x)).join('')}</article>
+  </div>`;
+}
+function advBodyHTML(a, x) {
+  const dt = advDate(x.date); const sun = dt.getDay() === 0 && !x.date.endsWith('12-25');
+  const sunName = sun ? ['First', 'Second', 'Third', 'Fourth'][x.wn] + ' Sunday of Advent' : '';
+  return `<section class="adv-piece" style="--cdl:${(ADV_CANDLES[x.wn] || ['', '#f1c75b'])[1]}">
+    <p class="adv-pos">${esc(advFmt(x.date))}${sunName ? ` · ${sunName}` : ''} · Day ${x.n} of ${a.days.length}</p>
+    <p class="adv-wk">${esc(x.week)}</p>
+    <h1 class="adv-dtitle-big">${esc(x.title)}</h1>
+    ${x.ref ? `<blockquote class="devo-verse adv-verse"><p>“${esc(x.verse)}”</p><cite>${esc(x.ref)}</cite></blockquote>` : ''}
+    ${x.read ? `<p class="adv-read"><b>Read</b> ${esc(x.read)}</p>` : ''}
+    ${x.voice ? `<figure class="adv-voice"><span class="adv-voice-who">${esc(x.guide || 'A voice')}</span><blockquote>${renderMd(x.voice)}</blockquote>${x.voiceBy ? `<figcaption>${renderMd(x.voiceBy)}</figcaption>` : ''}</figure>` : ''}
+    <div class="devo-body adv-body">${renderMd(x.body)}</div>
+    <div class="devo-steps">${x.practice ? `<div class="devo-step devo-try"><h3>Practice</h3>${renderMd(x.practice)}</div>` : ''}${x.pray ? `<div class="devo-step devo-pray"><h3>Pray</h3>${renderMd(x.pray)}</div>` : ''}</div>
+    ${x.cards.length ? `<div class="dr-cards devo-cards"><span>From your cards</span>${x.cards.map(p => { const c = S.cards.get(p); return `<button class="chip-card" data-open="${esc(p)}">${esc(c ? c.title : p.split('/').pop().replace(/\.md$/, ''))}</button>`; }).join('')}</div>` : ''}
+  </section>`;
+}
+function renderAdventDay(el, a, st) {
+  const x = a.days.find(y => y.date === S.view.date); if (!x) { location.hash = '#/advent'; return; }
+  S.list = x.cards.filter(p => S.cards.has(p));
+  if (S.speaking && S.speakFor !== advKey(a, x)) stopSpeaking();
+  const prev = a.days[x.n - 2], next = a.days[x.n];
+  const isD = !!devoDone()[advKey(a, x)]; const t = advToday();
+  const lit = x.date.endsWith('12-25') ? 5 : x.wn + 1;
+  el.innerHTML = `<div class="devo-read adv-read-wrap">
+    <div class="devo-top"><a class="crumb" href="#/advent">${icon('flame')}${esc(a.title)}</a><span class="devo-mins">${Math.max(3, Math.round(x.words / 170))} min</span></div>
+    <div class="adv-day-wreath">${wreathSVG(lit, 120)}</div>
+    ${x.date > t ? `<p class="adv-early">You’re reading ahead. This one is for ${esc(advFmt(x.date))}.</p>` : ''}
+    ${advBodyHTML(a, x)}
+    <div class="devo-bar">
+      <button class="btn ${isD ? '' : 'btn-primary'}" data-act="adv-done" aria-pressed="${isD}">${icon('check')}${isD ? 'Walked' : 'I walked this today'}</button>
+      <button class="btn" data-act="adv-listen" aria-pressed="${!!S.speaking}">${S.speaking ? 'Stop' : 'Listen'}</button>
+      <button class="btn btn-quiet" data-act="adv-share">${icon('share')}Share</button>
+      <button class="btn btn-quiet" data-act="adv-copy">Copy</button>
+    </div>
+    <nav class="devo-pager">
+      ${prev ? `<a class="devo-pg prev" href="${advHash(prev)}"><small>${esc(advFmt(prev.date, { month: 'short', day: 'numeric' }))}</small><span>${esc(prev.title)}</span></a>` : '<span></span>'}
+      ${next ? `<a class="devo-pg next" href="${advHash(next)}"><small>${esc(advFmt(next.date, { month: 'short', day: 'numeric' }))}</small><span>${esc(next.title)}</span></a>` : `<a class="devo-pg next" href="#/advent"><small>Merry Christmas</small><span>Back to the wreath</span></a>`}
+    </nav>
+  </div>`;
+}
+function advCur() { const d = adventDoc(); if (!d || !S.view.date) return null; const a = adventParse(d); const x = a.days.find(y => y.date === S.view.date); return x ? { a, x } : null; }
+function advText(a, x) {
+  return [x.title.toUpperCase(), advFmt(x.date), x.ref ? `${x.ref}\n“${x.verse}”` : '', x.read ? `Read: ${x.read}` : '', x.voice ? `${plain(x.voice)}${x.voiceBy ? `\n— ${plain(x.voiceBy)}` : ''}` : '',
+    plainKeepLines(x.body), x.practice ? `Practice: ${plain(x.practice)}` : '', x.pray ? `Pray: ${plain(x.pray)}` : ''].filter(Boolean).join('\n\n');
+}
+function advStep(dir) { const c = advCur(); if (!c) return; const to = c.a.days[c.x.n - 1 + dir]; if (to) { stopSpeaking(); location.hash = advHash(to); } }
+async function advAct(act) {
+  const c = advCur(); if (!c) return; const { a, x } = c;
+  if (act === 'adv-done') {
+    const done = devoDone(); const k = advKey(a, x);
+    if (done[k]) delete done[k]; else done[k] = today();
+    try { localStorage.setItem('cardeck.devo', JSON.stringify(done)); } catch (_) { }
+    render(); if (done[k]) toast(x.n < a.days.length ? 'Walked. See you tomorrow.' : 'Merry Christmas, Jeremy.'); return;
+  }
+  if (act === 'adv-copy') { try { await navigator.clipboard.writeText(advText(a, x)); toast('Copied'); } catch (_) { toast('Copy isn’t allowed here.'); } return; }
+  if (act === 'adv-share') {
+    const text = advText(a, x);
+    if (navigator.share) { try { await navigator.share({ title: x.title, text }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+    try { await navigator.clipboard.writeText(text); toast('Copied. Paste it anywhere.'); } catch (_) { toast('Sharing isn’t available here.'); } return;
+  }
+  if (act === 'adv-listen') {
+    if (!('speechSynthesis' in window)) { toast('Listening isn’t available on this device.'); return; }
+    if (S.speaking) { stopSpeaking(); render(); return; }
+    const text = [x.title + '.', x.ref ? `${x.ref}. ${x.verse}` : '', x.voice ? `${plain(x.voice)} ${plain(x.voiceBy)}.` : '', plain(x.body.replace(/\n/g, '\n\n')), x.practice ? `Practice. ${plain(x.practice)}` : '', x.pray ? `Pray. ${plain(x.pray)}` : ''].filter(Boolean).join(' ');
+    const chunks = text.match(/[^.!?]+[.!?]+["”’)]?\s*/g) || [text]; S.speaking = true; S.speakFor = advKey(a, x); render();
+    chunks.forEach((ch, i) => { const u = new SpeechSynthesisUtterance(ch); u.rate = 0.96; if (i === chunks.length - 1) u.onend = () => { S.speaking = false; render(); }; speechSynthesis.speak(u); });
+  }
+}
+(() => {
+  let sx = 0, sy = 0, st = 0;
+  document.addEventListener('touchstart', e => { if (S.view && S.view.kind === 'advent' && S.view.date && !S.reader && e.touches.length === 1 && !e.target.closest('textarea,input,button')) { sx = e.touches[0].clientX; sy = e.touches[0].clientY; st = Date.now(); } else st = 0; }, { passive: true });
+  document.addEventListener('touchend', e => { if (!st || Date.now() - st > 650) return; const t = e.changedTouches[0]; const dx = t.clientX - sx, dy = t.clientY - sy; st = 0; if (Math.abs(dx) > 80 && Math.abs(dy) < 50) advStep(dx < 0 ? 1 : -1); }, { passive: true });
 })();
 
 /* ---------------- stars, sharing, chapter list, manuscript, shortcuts ---------------- */
@@ -2468,6 +2668,8 @@ function bind() {
       case 'tab-boxes': toggleDrawer(true); break;
       case 'draft-new': case 'draft-edit': case 'draft-cancel': case 'draft-save': case 'draft-copy': case 'draft-md': case 'draft-listen': draftAct(a.dataset.act, a); break;
       case 'devo-listen': case 'devo-copy': case 'devo-share': case 'devo-done': case 'devo-edit': case 'devo-save': case 'devo-cancel': case 'devo-copyall': case 'devo-new': case 'devo-md': devoAct(a.dataset.act, a); break;
+      case 'adv-done': case 'adv-copy': case 'adv-share': case 'adv-listen': advAct(a.dataset.act); break;
+      case 'adv-intro': { const s = $('#adv-intro'); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'start' }); break; }
       case 'p-share': case 'p-copy': case 'p-next': case 'p-posted': postAct(a.dataset.act, a); break;
       case 'q-share': case 'q-copy': case 'q-image': case 'q-next': case 'q-save': quoteAct(a.dataset.act); break;
       case 'paste-link': { let t = ''; try { t = await navigator.clipboard.readText(); } catch (_) { } if (t && t.includes('connect=')) { useLink(t, $('#paste-msg')); } else { setupLink(); } break; }
@@ -2546,6 +2748,7 @@ function bind() {
     }
     if (S.reader && S.reader.editing) return;
     if (!S.reader && S.view.kind === 'devo' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { devoStep(e.key === 'ArrowLeft' ? -1 : 1); e.preventDefault(); return; }
+    if (!S.reader && S.view.kind === 'advent' && S.view.date && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { advStep(e.key === 'ArrowLeft' ? -1 : 1); e.preventDefault(); return; }
     if (e.key === '/') { e.preventDefault(); if (S.reader) closeReader(); $('#q').focus(); }
     else if (e.key === 'n') { e.preventDefault(); openReader(null, { isNew: true, replace: !!S.reader }); }
     else if (e.key === 'r') { draw(); }
