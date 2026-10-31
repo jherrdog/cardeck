@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.0.3';
+const VERSION = '1.1.0';
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
 const TYPE_PLURAL = { all: 'All', idea: 'Ideas', quote: 'Quotes', story: 'Stories', fact: 'Facts', question: 'Questions' };
@@ -570,6 +570,7 @@ function tileHTML(c, toks = [], cls = '') {
     + `<span class="tile-title" style="display:block">${hl(c.title, toks)}</span>`
     + `<span class="tile-text">${hl(excerpt(c, toks, cls === 'daycard' ? 900 : 420), toks)}</span>`
     + (flag && cls !== 'daycard' ? `<span class="tile-flag">${esc(flag)}</span>` : '')
+    + (c.date ? `<span class="tile-date">${esc(fmtDate(c.date))}</span>` : '')
     + `</button>`;
 }
 
@@ -599,6 +600,11 @@ function renderNav() {
 }
 
 function render() {
+  renderMain();
+  if (S.coach && S.coach.open) { renderCoach(); observeChapters(); if (S.view.kind === 'book') focusChapter(S.coach.ci || 0); }
+  const cb = $('#coach-btn'); if (cb) cb.setAttribute('aria-pressed', !!(S.coach && S.coach.open));
+}
+function renderMain() {
   renderNav();
   const el = view(); el.innerHTML = '';
   if (gridObserver) { gridObserver.disconnect(); gridObserver = null; }
@@ -678,6 +684,7 @@ function renderDesk(el) {
         <h2>${greet}. Here’s a card from ${esc(b ? b.name : 'your deck')}.</h2>
         <p>${dc && dc.date ? `You wrote it ${fmtDate(dc.date, true)}.` : ''} ${num(cn.total)} cards in ${num(cn.box.size)} boxes are on your desk.</p>
         <div class="row"><button class="btn" data-act="reroll">${icon('shuffle')}Draw another</button>${dc ? `<button class="btn btn-quiet" data-open="${esc(dc.path)}">Read it</button>` : ''}</div>
+        ${S.books.size ? `<button class="inbox-note coach-note" data-act="coach">${icon('spark')}<span><b>Writing coach.</b> Pick up where you left off in ${esc((coachBook() || {}).title || 'your book')}.</span></button>` : ''}
         ${cn.inbox ? `<button class="inbox-note" data-go="#/inbox">${icon('inbox')}<span><b>${num(cn.inbox)} ${cn.inbox === 1 ? 'card is' : 'cards are'} waiting in your Inbox.</b> File them when you’re ready.</span></button>` : ''}
       </div>
     </section>
@@ -736,7 +743,7 @@ function backFace(c) {
       ${fact('Who said it', esc(c.quoted.join(', ')))}
       ${fact('Source', esc(c.source))}
       ${fact('Date', esc(fmtDate(c.date, true)))}
-      ${fact('From Evernote', esc(c.evernote))}
+      ${fact(/^scrivener/i.test(c.evernote || '') ? 'From Scrivener' : 'From Evernote', esc((c.evernote || '').replace(/^Scrivener \/ /i, '')))}
       ${fact('Projects', tags(c.projects))}
       ${fact('Used in', booksWith(c.path).map(({ b, ch }) => `<a class="usedin" href="${bookHash(b)}"><b>${esc(b.title)}</b> · ${esc(ch.title)}</a>`).join(''))}
     </dl></div></article>`;
@@ -752,6 +759,7 @@ function renderReader() {
         <span class="corner">${esc(c.box || 'Inbox')}</span>
         <div class="big-head"><h1 class="big-title">${esc(c.title)}</h1></div>
         <div class="big-body">${renderMd(c.body) || '<p></p>'}</div>
+        ${c.date ? `<span class="card-date" title="Date created">${esc(fmtDate(c.date, true))}</span>` : ''}
       </article></div>
       <div class="face back" aria-hidden="${!r.flipped}">${backFace(c)}</div>
     </div></div></div>`;
@@ -935,7 +943,7 @@ function renderBook(el, b) {
   }).join('');
   el.innerHTML = `<div class="view-head"><div><a class="crumb" href="${L.allHash}">${L.tab}</a><h1 class="view-title">${esc(b.title)}</h1>${b.subtitle ? `<p class="view-sub book-sub">${esc(b.subtitle)}</p>` : ''}
       <div class="book-meta"><span>${num(n.chapters)} ${L.units}</span><span>${num(n.cards)} cards</span><label class="sr" for="book-status">Stage</label><select class="select" id="book-status">${L.status.map(([k, l]) => `<option value="${k}" ${b.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
-    <div class="view-actions">${S.list.length ? `<button class="btn" data-act="book-read">${icon('stack')}Read in order</button><button class="btn" data-act="draw">${icon('shuffle')}Draw</button>` : ''}<button class="btn" data-act="edit-book">${icon('pen')}Edit ${L.pitch.toLowerCase().replace(/^the /, '')}</button></div></div>
+    <div class="view-actions">${S.list.length ? `<button class="btn" data-act="book-read">${icon('stack')}Read in order</button><button class="btn" data-act="draw">${icon('shuffle')}Draw</button>` : ''}<button class="btn" data-act="edit-book">${icon('pen')}Edit ${L.pitch.toLowerCase().replace(/^the /, '')}</button><button class="btn btn-coach" data-act="coach">${icon('spark')}Coach</button></div></div>
     ${b.pitch ? `<details class="pitch" ${b.chapters.length ? '' : 'open'}><summary>${L.pitch}</summary><div class="pitch-body">${renderMd(b.pitch)}</div></details>` : ''}
     <p class="book-hint">Drag a card to move it${matchMedia('(pointer: coarse)').matches ? ' (press and hold first)' : ''}, or use ${icon('grip', 'ico inline')} on any card.</p>
     ${chapters || `<div class="empty"><h3>No ${L.units} yet</h3><p>Add a ${L.unit}, then pull cards into it.</p></div>`}
@@ -1087,6 +1095,327 @@ function addToBookMenu(anchor, path) {
     } }))), 0);
   };
   openMenu(anchor, books.map(b => ({ label: `${lex(b).kindLabel}: ${b.title}`, run: () => pickChapter(b) })));
+}
+
+/* ---------------- writing coach ----------------
+   A coach that lives beside a book idea or sermon series. It reads the outline and your deck, then:
+   names the one next step (with a button that does it), checks the stage, captures ideas into cards on the fly,
+   suggests cards that fit a chapter, spots cards that seem to belong elsewhere, offers prompts, and runs writing sprints.
+   Everything runs on this device; nothing leaves it except the cards you save. */
+const STOPW = new Set(('the a an and or of to in on for is are was were be been it its this that with as at by from your you i my me we our they their he his she her not but so if then than what who how why when where which do does did have has had just more most about into out up all can will would should there here very also like one get got going really know think want them us him am im ive dont its thats theres youre theyre were weve ill youll every some any no yes oh because only even still much many way make made things thing something lot day days time year years').split(' '));
+const ctoks = s => (s.toLowerCase().match(/[a-z][a-z']{2,}/g) || []).map(w => w.replace(/'s$|'/g, '')).filter(w => w.length > 2 && !STOPW.has(w));
+let SIM = null;
+function simIndex() {
+  if (SIM && SIM.size === S.cards.size) return SIM;
+  const df = new Map(), tf = new Map();
+  for (const c of S.cards.values()) {
+    if (c.box === 'Gratitude') continue;
+    const m = new Map(); for (const w of ctoks(c.title + ' ' + c.title + ' ' + c.body.slice(0, 2400))) m.set(w, (m.get(w) || 0) + 1);
+    tf.set(c.path, m); for (const w of m.keys()) df.set(w, (df.get(w) || 0) + 1);
+  }
+  const N = tf.size, vec = new Map(), norm = new Map(), inv = new Map();
+  for (const [p, m] of tf) {
+    const v = new Map(); let n = 0;
+    for (const [w, k] of m) { const d = df.get(w); if (d > N * .25) continue; const x = (1 + Math.log(k)) * Math.log(N / (1 + d)); v.set(w, x); n += x * x; }
+    vec.set(p, v); norm.set(p, Math.sqrt(n) || 1);
+    for (const [w, x] of v) { let a = inv.get(w); if (!a) inv.set(w, a = []); a.push([p, x]); }
+  }
+  SIM = { size: S.cards.size, df, N, vec, norm, inv };
+  return SIM;
+}
+function qvec(text) {
+  const X = simIndex(); const m = new Map(); for (const w of ctoks(text)) m.set(w, (m.get(w) || 0) + 1);
+  const v = new Map(); let n = 0;
+  for (const [w, k] of m) { const d = X.df.get(w); if (!d || d > X.N * .25) continue; const x = (1 + Math.log(k)) * Math.log(X.N / (1 + d)); v.set(w, x); n += x * x; }
+  return { v, n: Math.sqrt(n) || 1 };
+}
+function similar(text, k, exclude) {
+  const X = simIndex(), q = qvec(text); const sc = new Map();
+  const terms = [...q.v.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40);
+  for (const [w, x] of terms) for (const [p, y] of X.inv.get(w) || []) sc.set(p, (sc.get(p) || 0) + x * y);
+  const out = [];
+  for (const [p, s] of sc) { if (exclude && exclude.has(p)) continue; const c = S.cards.get(p); if (!c || /^\s*(Home\s+World|Home\s+U\.S\.|Skip navigation)/.test(c.body)) continue; out.push([p, s / (q.n * X.norm.get(p))]); }
+  return out.sort((a, b) => b[1] - a[1]).slice(0, k);
+}
+function chapterText(b, ch) {
+  return [ch.title, ch.title, ch.note, ch.needs, ...ch.items.slice(0, 8).map(it => { const c = S.cards.get(it.path); return c ? c.title + ' ' + c.body.slice(0, 700) : ''; })].join(' ');
+}
+function cosine(a, an, p) { const X = simIndex(); const v = X.vec.get(p); if (!v) return 0; let s = 0; for (const [w, x] of a) { const y = v.get(w); if (y) s += x * y; } return s / (an * X.norm.get(p)); }
+
+const PROMPTS = {
+  book: [
+    'What is the one scene that proves this chapter? Write only the scene.',
+    'Name one real person who needs this chapter. Write a card to them.',
+    'What would a skeptic say here? Answer them in one card.',
+    'Which card in this chapter is the strongest? Write the sentence that should come right before it.',
+    'Where is the story, where is the Scripture, and where is the practice? Write whichever is missing.',
+    'Finish this sentence: “The reader closes this chapter and…”',
+    'What mistake did you make here? Confession builds trust. Card it.',
+    'Write this chapter’s last line first.',
+    'One idea per card. Is any card here really two ideas? Split it.',
+    'Find the name, number or date that makes this concrete.',
+    'What do you believe about this now that you didn’t believe five years ago?',
+    'If this chapter were a sticky note on the fridge, what would it say?',
+    'What question will the reader be asking by page two? Answer it on a card.',
+    'Cut one card from this chapter. Which one, and why? Move it to the end or remove it.',
+    'Tell it the way you’d tell it across the table at the coffee shop. Write that version.',
+  ],
+  series: [
+    'What is the one thing they should remember on Monday?',
+    'Where is the tension? What question will they be asking five minutes in?',
+    'Me, We, God, You, We: which part is missing from this week?',
+    'What happened in your own life this week that fits this sermon?',
+    'What should they do this week? Make it small enough to do by Wednesday.',
+    'Which card is the illustration? Which card is the text? Which card is the landing?',
+    'Write the opening line, the one that makes a teenager look up.',
+    'What would a student who doesn’t believe any of this say? Answer them.',
+    'How does this week connect to last week and next week? Write the thread.',
+  ],
+};
+function coachBook() {
+  if (S.view.kind === 'book') { const b = curBook(); if (b) return b; }
+  let p = ''; try { p = localStorage.getItem('cardeck.coach.book') || ''; } catch (_) { }
+  return S.books.get(p) || sortedBooks()[0] || null;
+}
+function coachLog() { try { return JSON.parse(localStorage.getItem('cardeck.coach.log') || '{}'); } catch (_) { return {}; } }
+function coachMark(b, key) { try { const l = coachLog(); l[b.path] = l[b.path] || {}; l[b.path][key] = today(); const d = l.days || []; if (key === 'wrote' && !d.includes(today())) d.push(today()); l.days = d.slice(-60); localStorage.setItem('cardeck.coach.log', JSON.stringify(l)); } catch (_) { } }
+function streak() { const d = new Set(coachLog().days || []); let n = 0; const x = new Date(); for (; ;) { const k = `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; if (d.has(k)) { n++; x.setDate(x.getDate() - 1); } else break; } return n; }
+function median(a) { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; }
+const isFront = ch => /^(before|front|preface|intro)/i.test(ch.part || '');
+function coachChecks(b) {
+  const L = lex(b), chs = b.chapters, body = chs.filter(ch => !isFront(ch));
+  const counts = body.map(ch => ch.items.length), med = Math.max(3, median(counts));
+  const firstSentence = (plain(b.pitch || '').split(/(?<=[.!?])\s/)[0] || '');
+  const log = (coachLog()[b.path] || {});
+  const findCh = f => chs.findIndex(f);
+  const thin = findCh(ch => !isFront(ch) && ch.items.length < 3);
+  const empty = findCh(ch => !isFront(ch) && ch.items.length === 0);
+  const noSpine = findCh(ch => !isFront(ch) && !ch.note);
+  const needs = findCh(ch => ch.needs);
+  const fat = findCh(ch => !isFront(ch) && ch.items.length > Math.max(12, med * 3));
+  const U = L.unit, Us = L.units;
+  return [
+    { id: 'pitch', stage: 'Idea', ok: !!firstSentence && firstSentence.split(/\s+/).length <= 40, title: `Say the ${b.doc === 'series' ? 'series' : 'book'} in one sentence`, why: 'Holiday’s test: if you can’t say it in a sentence, you don’t know it yet. Put that sentence first in the pitch.', act: 'pitch', label: 'Write the sentence' },
+    { id: 'shape', stage: 'Idea', ok: body.length >= (b.doc === 'series' ? 3 : 5), title: `Sketch at least ${b.doc === 'series' ? 3 : 5} ${Us}`, why: `A rough list of ${Us} gives your cards somewhere to land. You can rename them all later.`, act: 'add-chapter', label: `Add a ${U}` },
+    { id: 'spine', stage: 'Outline', ok: noSpine < 0, ci: noSpine, title: `Give every ${U} one line that says what it argues`, why: noSpine >= 0 ? `“${chs[noSpine].title}” doesn’t say what it’s for yet.` : '', act: 'edit-ch', label: 'Write the line' },
+    { id: 'empty', stage: 'Outline', ok: empty < 0, ci: empty, title: `No empty ${Us}`, why: empty >= 0 ? `“${chs[empty].title}” has no cards. Pull some from your deck or capture a new one.` : '', act: 'suggest', label: 'Find cards' },
+    { id: 'thin', stage: 'Outline', ok: thin < 0, ci: thin, title: `At least three cards in every ${U}`, why: thin >= 0 ? `“${chs[thin].title}” has ${chs[thin].items.length}. Three cards is about where a ${U} starts to hold together.` : '', act: 'suggest', label: 'Find cards' },
+    { id: 'fat', stage: 'Outline', ok: fat < 0, ci: fat, title: `No ${U} carrying too much`, why: fat >= 0 ? `“${chs[fat].title}” holds ${chs[fat].items.length} cards, far more than the others. It may be two ${Us}.` : '', act: 'split', label: `Split the ${U}` },
+    { id: 'read', stage: 'Outline', ok: !!log.read, title: 'Read the whole thing in order once', why: 'Greene’s step: lay the cards out and read them straight through. Where you get bored, something is in the wrong place.', act: 'read', label: 'Read in order' },
+    { id: 'place', stage: 'Outline', ok: !!log.placed, title: 'Check where each card sits', why: 'The coach compares every card with every ' + U + ' and points out the ones that seem to belong somewhere else.', act: 'placement', label: 'Check placement' },
+    { id: 'needs', stage: 'Draft', ok: needs < 0, ci: needs, title: `Close the open “${L.needs}” notes`, why: needs >= 0 ? `“${chs[needs].title}”: ${chs[needs].needs}` : '', act: 'capture', label: 'Capture it' },
+    { id: 'sprint', stage: 'Draft', ok: !!log.wrote && log.wrote === today(), title: 'Write one new card today', why: 'Small and daily beats big and someday. A 15-minute sprint is enough.', act: 'sprint', label: 'Start a sprint' },
+  ];
+}
+function coachOpen(on) {
+  const el = $('#coach'); if (!el) return;
+  S.coach = S.coach || { tab: 'next', ci: 0, prompt: 0 };
+  S.coach.open = on ?? !S.coach.open;
+  document.body.classList.toggle('coach-on', S.coach.open);
+  el.hidden = !S.coach.open;
+  try { localStorage.setItem('cardeck.coach.open', S.coach.open ? '1' : ''); } catch (_) { }
+  if (S.coach.open) {
+    const b = coachBook();
+    if (b && S.view.kind !== 'book') { location.hash = bookHash(b); return; }
+    renderCoach();
+  }
+  const cb = $('#coach-btn'); if (cb) cb.setAttribute('aria-pressed', S.coach.open);
+}
+function focusChapter(ci) {
+  if (!S.coach) return; S.coach.ci = ci;
+  const sel = $('#cap-ch'); if (sel && !S.coach.pinned) sel.value = String(ci);
+  $$('.chapter.coach-focus').forEach(e => e.classList.remove('coach-focus'));
+  const sec = $(`.chapter[data-ch="${ci}"]`); sec && sec.classList.add('coach-focus');
+  if (S.coach.tab === 'ideas' || S.coach.tab === 'prompts') renderCoachTab();
+  const lab = $('#coach-focus-name'); if (lab) { const b = coachBook(); lab.textContent = b && b.chapters[ci] ? b.chapters[ci].title : ''; }
+}
+function scrollToChapter(ci) { const sec = $(`.chapter[data-ch="${ci}"]`); if (sec) { sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); focusChapter(ci); } }
+let coachObs = null;
+function observeChapters() {
+  if (coachObs) coachObs.disconnect(); coachObs = null;
+  if (!S.coach || !S.coach.open || S.view.kind !== 'book') return;
+  const seen = new Map();
+  coachObs = new IntersectionObserver(es => {
+    for (const e of es) seen.set(+e.target.dataset.ch, e.isIntersecting ? e.boundingClientRect.top : null);
+    const vis = [...seen.entries()].filter(([, t]) => t !== null).sort((a, b) => Math.abs(a[1] - 120) - Math.abs(b[1] - 120));
+    if (vis.length && vis[0][0] !== S.coach.ci) focusChapter(vis[0][0]);
+  }, { rootMargin: '-80px 0px -45% 0px' });
+  $$('.chapter[data-ch]').forEach(s => coachObs.observe(s));
+}
+function renderCoach() {
+  const el = $('#coach'); if (!el || !S.coach || !S.coach.open) return;
+  const b = coachBook();
+  if (!b) {
+    el.innerHTML = `<div class="coach-head"><h2>Writing coach</h2><button class="icon-btn" data-act="coach-close" aria-label="Close coach">${icon('x')}</button></div>
+      <div class="coach-body"><p class="coach-lead">Start a book idea or a sermon series. The coach will walk you through it, one step at a time.</p>
+      <div class="prow"><button class="pbtn primary" data-act="new-book" data-doc="book">New book idea</button><button class="pbtn" data-act="new-book" data-doc="series">New sermon series</button></div></div>`;
+    return;
+  }
+  try { localStorage.setItem('cardeck.coach.book', b.path); } catch (_) { }
+  const L = lex(b), checks = coachChecks(b), done = checks.filter(c => c.ok).length;
+  if (S.coach.ci >= b.chapters.length) S.coach.ci = 0;
+  const pct = Math.round(100 * done / checks.length);
+  const stage = (checks.find(c => !c.ok && !(S.coach.skipped || new Set()).has(c.id)) || { stage: 'Done' }).stage;
+  const books = sortedBooks();
+  el.innerHTML = `<div class="coach-head">
+      <div class="coach-id"><span class="coach-kicker">Writing coach</span>
+        <label class="sr" for="coach-book">Project</label><select id="coach-book" class="coach-book">${books.map(x => `<option value="${esc(x.path)}" ${x === b ? 'selected' : ''}>${esc(lex(x).kindLabel)}: ${esc(x.title)}</option>`).join('')}</select></div>
+      <button class="icon-btn coach-min" data-act="coach-min" aria-label="Minimize coach">${icon('down')}</button>
+      <button class="icon-btn" data-act="coach-close" aria-label="Close coach">${icon('x')}</button></div>
+    <div class="coach-progress"><div class="bar"><span style="width:${pct}%"></span></div><span class="coach-stage">${esc(stage === 'Done' ? 'Ready to write it all out' : stage + ' stage')} · ${done}/${checks.length}${streak() ? ` · ${streak()}-day streak` : ''}</span></div>
+    <form class="capture" id="capture" autocomplete="off">
+      <label class="sr" for="cap-text">Capture an idea</label>
+      <textarea id="cap-text" rows="2" placeholder="Capture an idea. It becomes a card in this ${esc(L.unit)}."></textarea>
+      <div class="cap-row"><label class="sr" for="cap-ch">${L.Unit}</label><select id="cap-ch">${b.chapters.map((ch, i) => `<option value="${i}" ${i === S.coach.ci ? 'selected' : ''}>${esc(ch.title)}</option>`).join('')}<option value="new">+ New ${esc(L.unit)}…</option></select>
+        <button class="pbtn primary" type="submit">${icon('plus')}Add card</button></div>
+      <p class="cap-hint">${matchMedia('(pointer: coarse)').matches ? '' : '⌘/Ctrl+Enter adds it. '}The first line becomes the title. It also goes to your Inbox to file later.</p>
+    </form>
+    <div class="coach-tabs" role="tablist">${[['next', 'Next step'], ['ideas', 'Find cards'], ['moves', 'Rearrange'], ['prompts', 'Prompts'], ['sprint', 'Sprint']].map(([k, l]) => `<button role="tab" data-ctab="${k}" aria-selected="${S.coach.tab === k}">${l}</button>`).join('')}</div>
+    <div class="coach-body" id="coach-tab"></div>`;
+  renderCoachTab();
+}
+function renderCoachTab() {
+  const box = $('#coach-tab'); if (!box) return; const b = coachBook(); if (!b) return;
+  const L = lex(b), t = S.coach.tab, ci = Math.min(S.coach.ci || 0, Math.max(0, b.chapters.length - 1)), ch = b.chapters[ci];
+  const chName = ch ? `<button class="linkish" data-cgo="${ci}" id="coach-focus-name">${esc(ch.title)}</button>` : '';
+  if (t === 'next') {
+    const checks = coachChecks(b), skip = S.coach.skipped || new Set(), next = checks.find(c => !c.ok && !skip.has(c.id));
+    box.innerHTML = (next ? `<div class="next-card"><span class="coach-kicker">Next step</span><h3>${esc(next.title)}</h3>${next.why ? `<p>${esc(next.why)}</p>` : ''}
+        <div class="prow"><button class="pbtn primary" data-cdo="${next.act}" data-cci="${next.ci ?? ''}">${esc(next.label)}</button>${next.ci != null && next.ci >= 0 ? `<button class="pbtn" data-cgo="${next.ci}">Show me</button>` : ''}<button class="pbtn quiet" data-cskip="${next.id}">Skip for now</button></div></div>`
+      : `<div class="next-card"><span class="coach-kicker">Next step</span><h3>The outline is ready. Write it out.</h3><p>Pick a ${esc(L.unit)}, start a sprint, and turn its cards into prose, one card at a time.</p><div class="prow"><button class="pbtn primary" data-cdo="sprint">Start a sprint</button></div></div>`)
+      + `<ol class="checks">${checks.map(c => `<li class="${c.ok ? 'ok' : ''}"><span class="tick">${c.ok ? icon('check') : ''}</span><span><b>${esc(c.title)}</b><small>${esc(c.stage)}</small></span>${c.ok ? '' : `<button class="pbtn small" data-cdo="${c.act}" data-cci="${c.ci ?? ''}">${esc(c.label)}</button>`}</li>`).join('')}</ol>`;
+    return;
+  }
+  if (!ch && t !== 'sprint') { box.innerHTML = `<p class="muted">Add a ${esc(L.unit)} first.</p><button class="pbtn primary" data-cdo="add-chapter">Add a ${esc(L.unit)}</button>`; return; }
+  if (t === 'ideas') {
+    const inBook = new Set(b.chapters.flatMap(c => c.items.map(i => i.path)));
+    const res = similar(chapterText(b, ch), 12, inBook).filter(([, s]) => s > 0.06);
+    box.innerHTML = `<p class="coach-lead">Cards from your deck that fit ${chName}. Scroll the outline and this list follows along.</p>`
+      + (res.length ? `<div class="sugg">${res.map(([p, s]) => { const c = S.cards.get(p); return `<div class="sg"><button class="sg-open" data-open="${esc(p)}"><span class="sg-t">${esc(c.title)}</span><span class="sg-b">${esc(c.box || 'Inbox')}${c.date ? ' · ' + esc(fmtDate(c.date)) : ''}</span><span class="sg-x">${esc(excerpt(c, [], 150))}</span></button><button class="pbtn small" data-cadd="${esc(p)}" data-cci="${ci}">Add</button></div>`; }).join('')}</div>`
+        : `<p class="muted">Nothing close yet. Give this ${esc(L.unit)} a line saying what it argues, or capture a first card, and suggestions will follow.</p>`)
+      + `<button class="pbtn" data-addcards="${ci}">${icon('search')}Search all cards</button>`;
+    return;
+  }
+  if (t === 'moves') {
+    const sug = S.coach.moves && S.coach.moves.book === b.path ? S.coach.moves.list : null;
+    const counts = b.chapters.map(c => c.items.length), med = Math.max(3, median(counts));
+    const fat = b.chapters.map((c, i) => [c, i]).filter(([c]) => !isFront(c) && c.items.length > Math.max(12, med * 3));
+    const empty = b.chapters.map((c, i) => [c, i]).filter(([c]) => !isFront(c) && !c.items.length);
+    box.innerHTML = `<p class="coach-lead">Move things around without losing anything. Every move is saved and synced, and you can drag cards in the outline too.</p>
+      <div class="prow"><button class="pbtn primary" data-cdo="placement">${sug ? 'Check again' : 'Check card placement'}</button></div>`
+      + (sug ? (sug.length ? `<div class="sugg">${sug.map((m, k) => { const c = S.cards.get(m.path); return c ? `<div class="sg"><button class="sg-open" data-open="${esc(m.path)}"><span class="sg-t">${esc(c.title)}</span><span class="sg-b">Now in “${esc(b.chapters[m.from].title)}”</span><span class="sg-x">Fits “${esc(b.chapters[m.to].title)}” better.</span></button><button class="pbtn small" data-cmove="${k}">Move</button></div>` : ''; }).join('')}</div>` : '<p class="muted">Every card sits where it fits best. Nice.</p>') : '')
+      + (fat.length ? `<h4>Heavy ${esc(L.units)}</h4>${fat.map(([c, i]) => `<div class="sg"><span class="sg-open"><span class="sg-t">${esc(c.title)}</span><span class="sg-b">${c.items.length} cards</span></span><button class="pbtn small" data-cdo="split" data-cci="${i}">Split in two</button></div>`).join('')}` : '')
+      + (empty.length ? `<h4>Empty ${esc(L.units)}</h4>${empty.map(([c, i]) => `<div class="sg"><span class="sg-open"><span class="sg-t">${esc(c.title)}</span></span><button class="pbtn small" data-cdo="suggest" data-cci="${i}">Find cards</button></div>`).join('')}` : '')
+      + `<h4>This ${esc(L.unit)}: ${chName}</h4><div class="prow wrap"><button class="pbtn small" data-cdo="ch-up" data-cci="${ci}">Move ${esc(L.unit)} up</button><button class="pbtn small" data-cdo="ch-down" data-cci="${ci}">Move ${esc(L.unit)} down</button><button class="pbtn small" data-cdo="edit-ch" data-cci="${ci}">Rename or retitle</button><button class="pbtn small" data-cdo="add-after" data-cci="${ci}">New ${esc(L.unit)} after</button></div>`;
+    return;
+  }
+  if (t === 'prompts') {
+    const P = PROMPTS[b.doc] || PROMPTS.book; const k = (S.coach.prompt + ci) % P.length; const p = P[k];
+    box.innerHTML = `<p class="coach-lead">A prompt for ${chName}.</p><blockquote class="prompt">${esc(p)}</blockquote>
+      <div class="prow"><button class="pbtn primary" data-cdo="use-prompt" data-prompt="${k}">Write it</button><button class="pbtn" data-cdo="next-prompt">Another prompt</button></div>
+      ${ch.needs ? `<p class="muted"><b>${esc(L.needs)}:</b> ${esc(ch.needs)}</p>` : ''}${ch.note ? `<p class="muted">${esc(plain(ch.note).slice(0, 300))}${plain(ch.note).length > 300 ? '…' : ''}</p>` : ''}`;
+    return;
+  }
+  if (t === 'sprint') {
+    const sp = S.coach.sprint;
+    if (sp && sp.end > Date.now()) {
+      const left = Math.max(0, sp.end - Date.now()), m = Math.floor(left / 60000), s = Math.floor(left / 1000) % 60;
+      box.innerHTML = `<div class="sprint"><span class="clock" id="sprint-clock">${m}:${String(s).padStart(2, '0')}</span><p>Writing in <b>${esc((b.chapters[sp.ci] || ch).title)}</b>. One idea per card. Don’t edit, just capture.</p><div class="prow"><button class="pbtn" data-cdo="sprint-stop">End sprint</button></div><p class="muted">${sp.made ? `${sp.made} ${sp.made === 1 ? 'card' : 'cards'} so far.` : 'Use the capture box above. Each idea becomes a card here.'}</p></div>`;
+      clearTimeout(S.coach.tick); S.coach.tick = setTimeout(() => { if (S.coach.tab === 'sprint') renderCoachTab(); }, 1000);
+    } else {
+      box.innerHTML = `<p class="coach-lead">Set a timer, pick ${chName}, and capture ideas as fast as they come. Holiday’s rule: card it now, sort it later.</p>
+        <div class="prow">${[10, 15, 25].map(n => `<button class="pbtn ${n === 15 ? 'primary' : ''}" data-csprint="${n}">${n} minutes</button>`).join('')}</div>
+        ${streak() ? `<p class="muted">You’ve written ${streak() === 1 ? 'today' : `${streak()} days in a row`}. Keep it going.</p>` : ''}`;
+    }
+  }
+}
+async function coachCapture() {
+  const b = coachBook(); if (!b) return; const ta = $('#cap-text'); const raw = ta.value.trim();
+  if (!raw) { ta.focus(); return; }
+  let sel = $('#cap-ch').value, ci;
+  if (sel === 'new') {
+    const v = await formBox(`New ${lex(b).unit}`, [{ name: 'title', label: `${lex(b).Unit} title`, placeholder: lex(b).unitPh }], `Add ${lex(b).unit}`);
+    if (!v || !v.title.trim()) return;
+    const cur = b.chapters[S.coach.ci]; b.chapters.splice((S.coach.ci ?? b.chapters.length - 1) + 1, 0, { title: v.title.trim(), part: cur ? cur.part : '', note: '', needs: '', items: [] });
+    ci = (S.coach.ci ?? b.chapters.length - 2) + 1;
+  } else ci = +sel;
+  const lines = raw.split(/\n/); let title = '', body = raw;
+  if (lines.length > 1 && lines[0].length <= 90) { title = lines[0].replace(/^#+\s*/, '').trim(); body = lines.slice(1).join('\n').trim() || title; }
+  else { const s = raw.split(/(?<=[.!?])\s/)[0]; title = s.length <= 70 ? s.replace(/[.!?]$/, '') : raw.split(/\s+/).slice(0, 7).join(' ') + '…'; }
+  const c = await saveCard({ title, box: '', also: [], type: /^[“"]/.test(raw) ? 'quote' : 'idea', quoted: [], source: '', date: today(), projects: [b.title], body }, null);
+  b.chapters[ci].items.push({ path: c.path, note: 'Captured with the coach.' });
+  scheduleBookSave(b, 500); coachMark(b, 'wrote');
+  if (SIM) { SIM = null; }
+  if (S.coach.sprint && S.coach.sprint.end > Date.now()) S.coach.sprint.made = (S.coach.sprint.made || 0) + 1;
+  ta.value = ''; S.coach.ci = ci; render(); renderCoach(); toast(`Card added to “${b.chapters[ci].title}”`);
+  requestAnimationFrame(() => { const t = $('#cap-text'); t && t.focus({ preventScroll: true }); const sec = $(`.chapter[data-ch="${ci}"]`); sec && sec.classList.add('coach-focus'); });
+}
+function placementCheck(b) {
+  const cents = b.chapters.map(ch => qvec(chapterText(b, ch)));
+  const out = [];
+  b.chapters.forEach((ch, ci) => {
+    if (isFront(ch) || ch.items.length < 2) return;
+    ch.items.forEach(it => {
+      if (!S.cards.has(it.path)) return;
+      const here = cosine(cents[ci].v, cents[ci].n, it.path); let best = ci, bs = here;
+      cents.forEach((q, k) => { if (k === ci || isFront(b.chapters[k])) return; const s = cosine(q.v, q.n, it.path); if (s > bs) { bs = s; best = k; } });
+      if (best !== ci && bs > 0.12 && bs > here * 1.8) out.push({ path: it.path, from: ci, to: best, gain: bs - here });
+    });
+  });
+  out.sort((a, b2) => b2.gain - a.gain);
+  S.coach.moves = { book: b.path, list: out.slice(0, 12) };
+  coachMark(b, 'placed');
+}
+async function coachDo(act, ci, el) {
+  const b = coachBook(); if (!b) return; const L = lex(b);
+  if (ci === '' || ci == null || isNaN(ci)) ci = S.coach.ci || 0; ci = +ci;
+  switch (act) {
+    case 'pitch': editBook(b); break;
+    case 'add-chapter': await editChapter(b, null); S.coach.ci = b.chapters.length - 1; renderCoach(); setTimeout(() => scrollToChapter(S.coach.ci), 80); break;
+    case 'add-after': { const v = await formBox(`New ${L.unit}`, [{ name: 'title', label: `${L.Unit} title`, placeholder: L.unitPh }], `Add ${L.unit}`); if (!v || !v.title.trim()) return; b.chapters.splice(ci + 1, 0, { title: v.title.trim(), part: (b.chapters[ci] || {}).part || '', note: '', needs: '', items: [] }); scheduleBookSave(b); S.coach.ci = ci + 1; render(); renderCoach(); setTimeout(() => scrollToChapter(ci + 1), 80); break; }
+    case 'edit-ch': await editChapter(b, ci); renderCoach(); break;
+    case 'suggest': S.coach.tab = 'ideas'; S.coach.ci = ci; renderCoach(); scrollToChapter(ci); break;
+    case 'capture': S.coach.ci = ci; renderCoach(); scrollToChapter(ci); { const t = $('#cap-text'); t.placeholder = b.chapters[ci].needs ? `${L.needs}: ${b.chapters[ci].needs}` : t.placeholder; t.focus(); } break;
+    case 'read': coachMark(b, 'read'); S.list = bookOrder(b); S.list.length ? openReader(S.list[0]) : toast('Add some cards first.'); renderCoach(); break;
+    case 'placement': placementCheck(b); S.coach.tab = 'moves'; renderCoach(); break;
+    case 'split': {
+      const ch = b.chapters[ci]; if (!ch || ch.items.length < 2) return;
+      const v = await formBox(`Split “${ch.title}”`, [{ name: 'title', label: `Title for the second half`, value: ch.title + ' (part two)' }], 'Split');
+      if (!v) return; const half = Math.ceil(ch.items.length / 2);
+      b.chapters.splice(ci + 1, 0, { title: v.title.trim() || ch.title + ' (part two)', part: ch.part, note: '', needs: '', items: ch.items.splice(half) });
+      scheduleBookSave(b); render(); renderCoach(); toast(`Split into two ${L.units}`); break;
+    }
+    case 'ch-up': if (ci > 0) { const [c] = b.chapters.splice(ci, 1); c.part = b.chapters[ci - 1].part; b.chapters.splice(ci - 1, 0, c); S.coach.ci = ci - 1; scheduleBookSave(b); render(); renderCoach(); scrollToChapter(ci - 1); } break;
+    case 'ch-down': if (ci < b.chapters.length - 1) { const [c] = b.chapters.splice(ci, 1); c.part = b.chapters[ci].part; b.chapters.splice(ci + 1, 0, c); S.coach.ci = ci + 1; scheduleBookSave(b); render(); renderCoach(); scrollToChapter(ci + 1); } break;
+    case 'use-prompt': { const P = PROMPTS[b.doc] || PROMPTS.book; const t = $('#cap-text'); t.placeholder = P[+el.dataset.prompt]; t.focus(); break; }
+    case 'next-prompt': S.coach.prompt++; renderCoachTab(); break;
+    case 'sprint': S.coach.tab = 'sprint'; renderCoach(); break;
+    case 'sprint-stop': { const sp = S.coach.sprint; S.coach.sprint = null; renderCoachTab(); toast(sp && sp.made ? `Sprint done: ${sp.made} new ${sp.made === 1 ? 'card' : 'cards'}.` : 'Sprint ended.'); break; }
+  }
+}
+function bindCoach() {
+  const el = $('#coach'); if (!el) return;
+  el.addEventListener('submit', e => { if (e.target.id === 'capture') { e.preventDefault(); coachCapture(); } });
+  el.addEventListener('keydown', e => { if (e.target.id === 'cap-text' && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); coachCapture(); } });
+  el.addEventListener('change', e => {
+    if (e.target.id === 'coach-book') { const b = S.books.get(e.target.value); if (b) { try { localStorage.setItem('cardeck.coach.book', b.path); } catch (_) { } S.coach.ci = 0; S.coach.moves = null; location.hash = bookHash(b); } }
+    if (e.target.id === 'cap-ch') { S.coach.pinned = e.target.value !== 'new'; if (e.target.value !== 'new') { S.coach.ci = +e.target.value; scrollToChapter(S.coach.ci); } }
+  });
+  el.addEventListener('click', async e => {
+    const t = e.target;
+    const tab = t.closest('[data-ctab]'); if (tab) { S.coach.tab = tab.dataset.ctab; $$('[data-ctab]', el).forEach(x => x.setAttribute('aria-selected', x === tab)); renderCoachTab(); return; }
+    const go = t.closest('[data-cgo]'); if (go) { scrollToChapter(+go.dataset.cgo); return; }
+    const d = t.closest('[data-cdo]'); if (d) { coachDo(d.dataset.cdo, d.dataset.cci, d); return; }
+    const sk = t.closest('[data-cskip]'); if (sk) { const b = coachBook(); coachMark(b, sk.dataset.cskip === 'read' ? 'read' : sk.dataset.cskip === 'place' ? 'placed' : 'skip-' + sk.dataset.cskip); S.coach.skipped = S.coach.skipped || new Set(); S.coach.skipped.add(sk.dataset.cskip); renderCoach(); return; }
+    const ad = t.closest('[data-cadd]'); if (ad) { const b = coachBook(); const ch = b.chapters[+ad.dataset.cci]; if (!ch.items.some(i => i.path === ad.dataset.cadd)) { ch.items.push({ path: ad.dataset.cadd, note: '' }); scheduleBookSave(b); render(); toast(`Added to “${ch.title}”`); } ad.textContent = 'Added'; ad.disabled = true; return; }
+    const mv = t.closest('[data-cmove]'); if (mv) { const b = coachBook(); const m = S.coach.moves.list[+mv.dataset.cmove]; const from = b.chapters[m.from], to = b.chapters[m.to]; const i = from.items.findIndex(x => x.path === m.path); if (i >= 0) { const [it] = from.items.splice(i, 1); to.items.push(it); scheduleBookSave(b); render(); toast(`Moved to “${to.title}”`); } S.coach.moves.list.splice(+mv.dataset.cmove, 1); renderCoachTab(); return; }
+    const sp = t.closest('[data-csprint]'); if (sp) { const b = coachBook(); S.coach.sprint = { end: Date.now() + +sp.dataset.csprint * 60000, ci: S.coach.ci || 0, made: 0, book: b.path }; renderCoachTab(); $('#cap-text').focus(); return; }
+    const a = t.closest('[data-act]');
+    if (a && a.dataset.act === 'coach-close') { e.stopPropagation(); coachOpen(false); return; }
+    if (a && a.dataset.act === 'coach-min') { e.stopPropagation(); el.classList.toggle('min'); return; }
+  });
+  // chapters: clicking a chapter heading focuses it in the coach
+  document.addEventListener('click', e => { if (!S.coach || !S.coach.open) return; const sec = e.target.closest('.chapter[data-ch]'); if (sec && !e.target.closest('.tile,[data-btmenu],[data-chmenu]')) focusChapter(+sec.dataset.ch); });
 }
 
 /* drag cards between sections: mouse drags at once; touch drags after a short press */
@@ -1453,9 +1782,20 @@ function bind() {
   $('#q-clear').addEventListener('click', () => { qi.value = ''; S.q = ''; $('#q-clear').hidden = true; render(); qi.focus(); });
   $('#new-btn').addEventListener('click', () => openReader(null, { isNew: true }));
   $('#fab').addEventListener('click', () => openReader(null, { isNew: true }));
+  $('#coach-btn') && $('#coach-btn').addEventListener('click', () => coachOpen());
+  bindCoach();
   $('#menu-btn').addEventListener('click', () => toggleDrawer(true));
   $('#open-settings').addEventListener('click', () => { toggleDrawer(false); S.settings ? openSettings() : setupHome(); });
   $('#sync').addEventListener('click', () => { if (S.gh) sync(); else openSettings(); });
+  let rdDown = null;
+  const outsideCard = t => !t.closest('.bigcard, .props, .coach, button, a, input, textarea, select, label, #menu');
+  $('#reader').addEventListener('pointerdown', e => { rdDown = outsideCard(e.target) ? e.target : null; });
+  $('#reader').addEventListener('click', e => {
+    if (!S.reader || !rdDown || !outsideCard(e.target)) { rdDown = null; return; }
+    rdDown = null; if (window.getSelection && String(window.getSelection())) return;
+    if (S.reader.editing && !S.reader.isNew) { $('[data-act="cancel"]') && $('[data-act="cancel"]').click(); return; }
+    closeReader();
+  });
   $('#scrim').addEventListener('click', () => { if (!$('#panel').hidden) closePanel(); else if ($('#shell').classList.contains('drawer')) toggleDrawer(false); else if (S.reader) closeReader(); });
   $('#side').addEventListener('click', e => { if (e.target.closest('a')) toggleDrawer(false); });
 
@@ -1474,6 +1814,7 @@ function bind() {
     const pk = t.closest('[data-pick]'); if (pk) { pickCard(pk.dataset.pick); return; }
     const a = t.closest('[data-act]'); if (!a) return;
     switch (a.dataset.act) {
+      case 'coach': coachOpen(true); break;
       case 'close': closeReader(); break;
       case 'prev': { const n = neighbors().prev; n && openReader(n, { replace: true }); break; }
       case 'next': { const n = neighbors().next; n && openReader(n, { replace: true }); break; }
@@ -1548,6 +1889,7 @@ function bind() {
     if (e.key === '/') { e.preventDefault(); if (S.reader) closeReader(); $('#q').focus(); }
     else if (e.key === 'n') { e.preventDefault(); openReader(null, { isNew: true, replace: !!S.reader }); }
     else if (e.key === 'r') { draw(); }
+    else if (e.key === 'c') { e.preventDefault(); coachOpen(); }
   });
   window.addEventListener('online', () => sync({ quiet: true }));
   window.addEventListener('offline', syncIdle);
@@ -1568,6 +1910,7 @@ async function boot() {
   syncIdle();
   const h = parseHash();
   if (h.kind !== 'card' && h.kind !== 'new' && h.kind !== 'connect') S.view = h;
+  try { if (localStorage.getItem('cardeck.coach.open') && S.books.size && matchMedia('(min-width: 1100px)').matches) { S.coach = { tab: 'next', ci: 0, prompt: 0, open: true }; document.body.classList.add('coach-on'); $('#coach').hidden = false; } } catch (_) { }
   render();
   if (h.kind === 'card' || h.kind === 'new' || h.kind === 'connect') route();
   if (!S.settings && h.kind !== 'connect') setupHome();
