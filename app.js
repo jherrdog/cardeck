@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
@@ -48,7 +48,7 @@ function relTime(ts) {
 const KNOWN = new Set(['category', 'also', 'type', 'quoted', 'source', 'date', 'evernote', 'projects', 'status']);
 function unq(v) {
   v = v.trim();
-  if (v.length >= 2 && v[0] === '"' && v.at(-1) === '"') return v.slice(1, -1).replace(/\\(["\\])/g, '$1');
+  if (v.length >= 2 && v[0] === '"' && v.at(-1) === '"') return v.slice(1, -1).replace(/\\(["\\n])/g, (m, c) => c === 'n' ? '\n' : c);
   if (v.length >= 2 && v[0] === "'" && v.at(-1) === "'") return v.slice(1, -1).replace(/''/g, "'");
   return v;
 }
@@ -84,7 +84,7 @@ function parseFM(text) {
 const asList = v => Array.isArray(v) ? v : (v ? [v] : []);
 const asStr = v => Array.isArray(v) ? v.join(', ') : (v || '');
 const unlink = s => { const m = /^\[\[([^\]|]+)(?:\|([^\]]+))?\]\]$/.exec(s); return m ? (m[2] || m[1]) : s; };
-const q = v => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+const q = v => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n') + '"';
 
 function isBookPath(p) { return /^(Books|Sermons)\/[^/]+\.md$/i.test(p); }
 function isTracked(p) { return isCardPath(p) || isBookPath(p); }
@@ -735,6 +735,7 @@ function renderDesk(el) {
     </section>
     ${otd.length ? `<section class="desk-section"><div class="section-head"><h2>${otdLabel}</h2><p>${fmtDate(today(), true).replace(/,? \d{4}$/, '')}, in years past</p></div><div class="strip">${otd.map(c => tileHTML(c)).join('')}</div></section>` : ''}
     ${recent.length ? `<section class="desk-section"><div class="section-head"><h2>Recently edited</h2><p>On this device</p></div><div class="strip">${recent.map(c => tileHTML(c)).join('')}</div></section>` : ''}
+    ${postHTML()}
     ${quoteHTML()}
     ${(() => { const st = [...S.cards.values()].filter(isStarred).sort((x, y) => (y.edited || 0) - (x.edited || 0)).slice(0, 12); return st.length ? `<section class="desk-section"><div class="section-head"><h2>Starred</h2><p><a class="crumb" href="#/starred">See all</a></p></div><div class="strip">${st.map(c => tileHTML(c)).join('')}</div></section>` : ''; })()}
     ${S.books.size ? `<section class="desk-section"><div class="section-head"><h2>On the floor</h2><p>Book ideas and sermon series you’re arranging</p></div><div class="covers covers-strip">${sortedBooks().slice(0, 8).map(coverHTML).join('')}</div></section>` : ''}
@@ -1615,6 +1616,47 @@ async function quoteAct(act) {
   }
 }
 
+/* ---------------- today's post from your writing ---------------- */
+function postPool() { return [...S.cards.values()].filter(c => c.extra && c.extra.facebook && !c.extra.posted).sort((a, b) => a.path.localeCompare(b.path)); }
+function curPost() {
+  const pool = postPool();
+  if (!pool.length) {
+    const st = [...S.cards.values()].filter(c => isStarred(c) && !c.extra.posted && c.body.length > 120);
+    if (!st.length) return null; const c = st[(dayIndex() + (S.postShift || 0)) % st.length];
+    const words = plain(c.body).split(/\s+/); return { c, text: words.slice(0, 140).join(' ') + (words.length > 140 ? '…' : ''), auto: true };
+  }
+  const md = today().slice(5);
+  const dated = pool.find(c => String(c.extra.facebook_on || '') === md);
+  const c = (!S.postShift && dated) || pool[(dayIndex() + (S.postShift || 0)) % pool.length];
+  return { c, text: c.extra.facebook };
+}
+function postHTML() {
+  const p = curPost(); if (!p) return '';
+  const done = [...S.cards.values()].filter(c => c.extra && c.extra.posted).length, left = postPool().length;
+  return `<section class="desk-section fbpost"><div class="section-head"><h2>Today’s post from your writing</h2><p>${left ? `${num(left)} ready` : 'From your starred cards'}${done ? ` · ${num(done)} posted` : ''}</p></div>
+    <div class="fb-card"><div class="fb-head"><img src="icons/orange-192.png" alt="" width="40" height="40"><div><b>Jeremy Herr</b><span>From your card “${esc(p.c.title)}”${p.c.date ? `, ${esc(fmtDate(p.c.date))}` : ''}</span></div></div>
+      <div class="fb-text" id="fb-text" contenteditable="true" spellcheck="true" aria-label="Post text you can edit">${esc(p.text)}</div>
+      <p class="fb-hint">Tap the text to tweak it before you post.</p></div>
+    <div class="row qrow"><button class="btn btn-primary" data-act="p-share">${icon('share')}Share to Facebook</button><button class="btn" data-act="p-copy">Copy post</button><button class="btn btn-quiet" data-act="p-next">${icon('shuffle')}Another</button><button class="btn btn-quiet" data-open="${esc(p.c.path)}">Open the card</button><button class="btn btn-quiet" data-act="p-posted" data-path="${esc(p.c.path)}">${icon('check')}I posted it</button></div></section>`;
+}
+async function postAct(act, el) {
+  const box = $('#fb-text'); const text = box ? box.innerText.trim() : '';
+  if (act === 'p-next') { S.postShift = (S.postShift || 0) + 1; const s = $('.fbpost'); if (s) s.outerHTML = postHTML(); return; }
+  if (act === 'p-copy') { try { await navigator.clipboard.writeText(text); toast('Post copied. Paste it into Facebook.'); } catch (_) { toast('Copy isn’t allowed here.'); } return; }
+  if (act === 'p-share') {
+    try { await navigator.clipboard.writeText(text); } catch (_) { }
+    if (navigator.share) { try { await navigator.share({ text }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+    window.open('https://www.facebook.com/', '_blank', 'noopener'); toast('Post copied. Paste it into a new Facebook post.'); return;
+  }
+  if (act === 'p-posted') {
+    const c = S.cards.get(el.dataset.path); if (!c) return;
+    c.extra.posted = today(); if (!c.extraOrder.includes('posted')) c.extraOrder.push('posted');
+    c.text = serialize(c); c.edited = Date.now(); await DB.putCards([c]);
+    if (S.gh) await queue({ kind: 'put', path: c.path, text: c.text, sha: c.sha, msg: `Posted to Facebook: ${c.title}` });
+    S.postShift = 0; const s = $('.fbpost'); if (s) s.outerHTML = postHTML(); toast('Marked as posted. Tomorrow brings a new one.');
+  }
+}
+
 /* ---------------- stars, sharing, chapter list, manuscript, shortcuts ---------------- */
 function isStarred(c) { return !!c && c.extra && String(c.extra.starred) === 'true'; }
 async function toggleStar(path) {
@@ -2122,6 +2164,7 @@ function bind() {
       case 'ms-notes': S.msNotes = !S.msNotes; render(); break;
       case 'keys': showKeys(); break;
       case 'tab-boxes': toggleDrawer(true); break;
+      case 'p-share': case 'p-copy': case 'p-next': case 'p-posted': postAct(a.dataset.act, a); break;
       case 'q-share': case 'q-copy': case 'q-image': case 'q-next': case 'q-save': quoteAct(a.dataset.act); break;
       case 'paste-link': { let t = ''; try { t = await navigator.clipboard.readText(); } catch (_) { } if (t && t.includes('connect=')) { useLink(t, $('#paste-msg')); } else { setupLink(); } break; }
       case 'dismiss-a2hs': try { localStorage.setItem('cardeck.a2hs', '1'); } catch (_) { } render(); break;
@@ -2178,7 +2221,7 @@ function bind() {
     }
   });
   document.addEventListener('keydown', e => {
-    const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+    const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) || document.activeElement.isContentEditable;
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && S.reader && S.reader.editing) { e.preventDefault(); doSave(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); if (S.reader) closeReader(); $('#q').focus(); $('#q').select(); return; }
     if (e.key === 'Escape') {

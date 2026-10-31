@@ -715,3 +715,12 @@ mark { background: linear-gradient(transparent 12%, var(--marker) 12%, var(--mar
 .qrow { margin-top: 14px; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 560px) { .qrow .btn { flex: 1 1 auto; justify-content: center; } }
 .qrow .btn { min-height: 46px; }
+/* today's post */
+.fb-card { background: #fff; color: #1c1e21; border-radius: 14px; padding: 16px 18px 12px; max-width: 680px; box-shadow: 0 20px 44px -24px rgba(0,0,0,.6); border-top: 4px solid var(--accent); }
+.fb-head { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+.fb-head img { border-radius: 50%; }
+.fb-head b { display: block; font: 600 15px var(--ui); }
+.fb-head span { font: 12.5px var(--ui); color: #65676b; }
+.fb-text { white-space: pre-wrap; font: calc(16px * var(--fz))/1.5 var(--ui); outline: none; border-radius: 8px; padding: 2px 4px; margin: 0 -4px; }
+.fb-text:focus { background: #fff7f2; box-shadow: 0 0 0 2px rgba(255,95,31,.35); }
+.fb-hint { margin: 10px 0 0; font: 12px var(--ui); color: #8a8d91; }
