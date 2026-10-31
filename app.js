@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
@@ -87,12 +87,14 @@ const unlink = s => { const m = /^\[\[([^\]|]+)(?:\|([^\]]+))?\]\]$/.exec(s); re
 const q = v => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n') + '"';
 
 function isBookPath(p) { return /^(Books|Sermons)\/[^/]+\.md$/i.test(p); }
-function isTracked(p) { return isCardPath(p) || isBookPath(p); }
-function makeDoc(path, text, sha, extra) { return isBookPath(path) ? makeBook(path, text, sha, extra) : makeCard(path, text, sha, extra); }
-function docGet(p) { return S.cards.get(p) || S.books.get(p); }
-function docSet(d) { (d.kind === 'book' ? S.books : S.cards).set(d.path, d); }
-function docDel(p) { S.cards.delete(p); S.books.delete(p); }
-function allDocs() { return [...S.cards.values(), ...S.books.values()]; }
+function isDraftPath(p) { return /^Drafts\/[^/]+\.md$/i.test(p); }
+function isTracked(p) { return isCardPath(p) || isBookPath(p) || isDraftPath(p); }
+function makeDraft(path, text, sha, extra = {}) { return { kind: 'draft', path, sha: sha || null, text, title: path.split('/').pop().replace(/\.md$/i, ''), edited: extra.edited || 0 }; }
+function makeDoc(path, text, sha, extra) { return isDraftPath(path) ? makeDraft(path, text, sha, extra) : isBookPath(path) ? makeBook(path, text, sha, extra) : makeCard(path, text, sha, extra); }
+function docGet(p) { return S.cards.get(p) || S.books.get(p) || (S.drafts && S.drafts.get(p)); }
+function docSet(d) { (d.kind === 'book' ? S.books : d.kind === 'draft' ? (S.drafts = S.drafts || new Map()) : S.cards).set(d.path, d); }
+function docDel(p) { S.cards.delete(p); S.books.delete(p); S.drafts && S.drafts.delete(p); }
+function allDocs() { return [...S.cards.values(), ...S.books.values(), ...(S.drafts ? S.drafts.values() : [])]; }
 function isCardPath(p) { return /\.md$/i.test(p) && ((p.startsWith('Cards/') && p.split('/').length === 3) || (p.startsWith(INBOX + '/') && p.split('/').length === 2)); }
 function boxOf(p) { return p.startsWith('Cards/') ? p.split('/')[1] : ''; }
 function folderFor(box) { return box ? `Cards/${box}` : INBOX; }
@@ -366,7 +368,7 @@ async function loadLocal() {
   const [rows, boxes, last] = await Promise.all([DB.all('cards'), DB.get('boxes'), DB.get('lastSync')]);
   S.boxes = boxes || [];
   S.sync.last = last || 0;
-  S.cards = new Map(); S.books = new Map();
+  S.cards = new Map(); S.books = new Map(); S.drafts = new Map();
   for (const r of rows) { if (!isTracked(r.path)) continue; const d = makeDoc(r.path, r.text, r.sha, { edited: r.edited }); docSet(d); }
   S.outbox = (await DB.all('outbox')).length;
 }
@@ -976,7 +978,14 @@ function btileHTML(b, ci, ii, it) {
   if (!c) return `<div class="btile missing" data-ch="${ci}" data-idx="${ii}"><div class="bt-card"><div class="tile"><span class="tile-title">${esc(it.path.split('/').pop().replace(/\.md$/i, ''))}</span><span class="tile-text">This card isn’t in your deck yet. Import the file it came from, or remove it here.</span></div>${menu}</div>${note}</div>`;
   return `<div class="btile" data-ch="${ci}" data-idx="${ii}"><div class="bt-card">${tileHTML(c)}${menu}</div>${note}</div>`;
 }
+function draftOf(b) { return S.drafts && S.drafts.get(`Drafts/${b.title}.md`); }
+function bookTabsHTML(b) {
+  const t = (S.bookTabs && S.bookTabs[b.path]) || 'outline'; const d = draftOf(b);
+  const w = d ? (draftBody(d).replace(/\*Built from:\*.*$/gm, '').match(/\S+/g) || []).length : 0;
+  return `<div class="book-tabs" role="tablist"><button role="tab" data-btab="outline" aria-selected="${t === 'outline'}">${icon('rows')}Outline</button><button role="tab" data-btab="draft" aria-selected="${t === 'draft'}">${icon('pen')}Draft${w ? `<span class="n">${num(w)} words</span>` : ''}</button></div>`;
+}
 function renderBook(el, b) {
+  if (S.bookTabs && S.bookTabs[b.path] === 'draft') return renderDraft(el, b);
   const L = lex(b); S.list = bookOrder(b); const n = bookCounts(b);
   let num_ = 0, part = null;
   const chapters = b.chapters.map((ch, ci) => {
@@ -994,6 +1003,7 @@ function renderBook(el, b) {
   el.innerHTML = `<div class="view-head"><div><a class="crumb" href="${L.allHash}">${L.tab}</a><h1 class="view-title">${esc(b.title)}</h1>${b.subtitle ? `<p class="view-sub book-sub">${esc(b.subtitle)}</p>` : ''}
       <div class="book-meta"><span>${num(n.chapters)} ${L.units}</span><span>${num(n.cards)} cards</span><label class="sr" for="book-status">Stage</label><select class="select" id="book-status">${L.status.map(([k, l]) => `<option value="${k}" ${b.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
     <div class="view-actions">${S.list.length ? `<button class="btn" data-act="book-read">${icon('stack')}Read in order</button><button class="btn" data-act="draw">${icon('shuffle')}Draw</button>` : ''}<button class="btn" data-act="edit-book">${icon('pen')}Edit ${L.pitch.toLowerCase().replace(/^the /, '')}</button><button class="btn btn-coach" data-act="coach">${icon('spark')}Coach</button></div></div>
+    ${bookTabsHTML(b)}
     <div class="book-tools"><button class="btn btn-quiet" data-act="toc">${icon('list')}Chapters</button><button class="btn btn-quiet" data-act="compact" aria-pressed="${!!S.compact}">${icon('rows')}${S.compact ? 'Show cards' : 'Outline only'}</button><button class="btn btn-quiet" data-act="compile">${icon('doc')}Read as manuscript</button></div>
     ${b.pitch ? `<details class="pitch" ${b.chapters.length ? '' : 'open'}><summary>${L.pitch}</summary><div class="pitch-body">${renderMd(b.pitch)}</div></details>` : ''}
     <p class="book-hint">Drag a card to move it${matchMedia('(pointer: coarse)').matches ? ' (press and hold first)' : ''}, or use ${icon('grip', 'ico inline')} on any card.</p>
@@ -1657,6 +1667,83 @@ async function postAct(act, el) {
   }
 }
 
+/* ---------------- drafts: the prose of a book, written chapter by chapter ---------------- */
+function draftParts(d) { const m = /^---\n([\s\S]*?)\n---\n?/.exec(d.text); return m ? { fm: m[0], body: d.text.slice(m[0].length) } : { fm: '', body: d.text }; }
+function draftBody(d) { return draftParts(d).body; }
+function draftSections(body) {
+  const out = []; let cur = null;
+  for (const line of body.replace(/\r/g, '').split('\n')) {
+    const m = /^#\s+(.+)$/.exec(line);
+    if (m) { cur = { title: m[1].trim(), lines: [] }; out.push(cur); continue; }
+    if (!cur) { cur = { title: '', lines: [] }; out.push(cur); }
+    cur.lines.push(line);
+  }
+  return out.filter(x => x.title || x.lines.join('').trim());
+}
+function draftSectionHTML(sec, i) {
+  const blocks = sec.lines.join('\n').split(/\n\s*\n/); const html = [];
+  for (const blk of blocks) {
+    const t = blk.trim(); if (!t) continue;
+    const h = /^##\s+(.+)$/.exec(t);
+    if (h) { html.push(`<h3 class="dr-h">${esc(h[1])}</h3>`); continue; }
+    if (/^\*Built from:\*/.test(t)) {
+      const links = [...t.matchAll(/\[\[([^\]]+)\]\]/g)].map(m => m[1] + '.md');
+      html.push(`<div class="dr-cards"><span>Cards behind this ${i ? 'chapter' : 'section'}</span>${links.map(p => { const c = S.cards.get(p); return `<button class="chip-card" data-open="${esc(p)}">${esc(c ? c.title : p.split('/').pop().replace(/\.md$/, ''))}</button>`; }).join('')}</div>`);
+      continue;
+    }
+    html.push(renderMd(t));
+  }
+  return `<section class="dr-sec" id="dr-${i}">${sec.title ? `<h2 class="dr-title">${esc(sec.title)}</h2>` : ''}${html.join('')}</section>`;
+}
+function renderDraft(el, b) {
+  const L = lex(b), d = draftOf(b); S.list = bookOrder(b);
+  const head = `<div class="view-head"><div><a class="crumb" href="${L.allHash}">${L.tab}</a><h1 class="view-title">${esc(b.title)}</h1>${b.subtitle ? `<p class="view-sub book-sub">${esc(b.subtitle)}</p>` : ''}</div></div>${bookTabsHTML(b)}`;
+  if (!d) {
+    el.innerHTML = head + `<div class="empty"><h3>No draft yet</h3><p>The draft is where the outline turns into prose. Start one and it opens with a heading for each ${esc(L.unit)}, ready to write.</p><button class="btn btn-primary" data-act="draft-new">${icon('pen')}Start the draft</button></div>`;
+    return;
+  }
+  const secs = draftSections(draftBody(d));
+  if (S.draftEdit === d.path) {
+    el.innerHTML = head + `<div class="dr-edit"><p class="muted dr-help"># starts a chapter, ## a section. Blank lines separate paragraphs. Your changes save to your private repository.</p>
+      <textarea id="dr-text" spellcheck="true">${esc(draftBody(d))}</textarea>
+      <div class="row"><button class="btn btn-primary" data-act="draft-save">${icon('check')}Save draft</button><button class="btn" data-act="draft-cancel">Cancel</button></div></div>`;
+    const ta = $('#dr-text'); ta.style.height = Math.max(420, ta.scrollHeight + 20) + 'px'; ta.focus({ preventScroll: true });
+    return;
+  }
+  const words = (draftBody(d).replace(/\*Built from:\*.*$/gm, '').match(/\S+/g) || []).length;
+  el.innerHTML = head + `<div class="dr-bar"><span class="dr-stat">${num(words)} words · ${Math.max(1, Math.round(words / 230))} min read · ${secs.filter(x => x.title).length} ${secs.length === 1 ? 'part' : 'parts'}</span>
+      <div class="dr-actions"><button class="btn" data-act="draft-edit">${icon('pen')}Edit</button><button class="btn" data-act="draft-listen" aria-pressed="${!!S.speaking}">${S.speaking ? 'Stop' : 'Listen'}</button><button class="btn btn-quiet" data-act="draft-copy">Copy</button><button class="btn btn-quiet" data-act="draft-md">Download</button><button class="btn btn-quiet" data-act="print">Print or PDF</button></div></div>
+    <nav class="dr-nav">${secs.map((x, i) => x.title ? `<button class="chip" data-drgo="${i}">${esc(x.title.replace(/:.*/, ''))}</button>` : '').join('')}</nav>
+    <article class="manuscript draft">${secs.map(draftSectionHTML).join('')}</article>`;
+}
+async function saveDraft(d, body) {
+  d.text = (draftParts(d).fm || '') + body.replace(/\s+$/, '') + '\n'; d.edited = Date.now();
+  S.drafts.set(d.path, d); await DB.putCards([d]);
+  if (S.gh) await queue({ kind: 'put', path: d.path, text: d.text, sha: d.sha, msg: `Draft: ${d.title}` });
+}
+async function draftAct(act, el) {
+  const b = curBook(); if (!b) return; const d = draftOf(b);
+  if (act === 'draft-new') {
+    const path = `Drafts/${b.title}.md`;
+    const body = b.chapters.map(ch => `# ${ch.title}\n\n`).join('');
+    const nd = makeDraft(path, `---\ntype: draft\nbook: ${q(b.title)}\nstatus: started\n---\n${body}`, null); S.drafts.set(path, nd);
+    await saveDraft(nd, body); S.draftEdit = path; render(); return;
+  }
+  if (!d) return;
+  if (act === 'draft-edit') { S.draftEdit = d.path; render(); return; }
+  if (act === 'draft-cancel') { S.draftEdit = null; render(); return; }
+  if (act === 'draft-save') { await saveDraft(d, $('#dr-text').value); S.draftEdit = null; render(); toast('Draft saved'); return; }
+  if (act === 'draft-copy') { try { await navigator.clipboard.writeText(draftBody(d)); toast('Draft copied'); } catch (_) { toast('Copy isn’t allowed here.'); } return; }
+  if (act === 'draft-md') { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([draftBody(d)], { type: 'text/markdown' })); a.download = `${safeName(b.title)} (draft).md`; document.body.appendChild(a); a.click(); a.remove(); return; }
+  if (act === 'draft-listen') {
+    if (!('speechSynthesis' in window)) { toast('Listening isn’t available on this device.'); return; }
+    if (S.speaking) { speechSynthesis.cancel(); S.speaking = false; render(); return; }
+    const text = plain(draftBody(d).replace(/\*Built from:\*.*$/gm, '').replace(/^#+\s*/gm, ''));
+    const chunks = text.match(/[^.!?]+[.!?]+["”’]?\s*/g) || [text]; S.speaking = true; render();
+    chunks.forEach((c, i) => { const u = new SpeechSynthesisUtterance(c); u.rate = 1; if (i === chunks.length - 1) u.onend = () => { S.speaking = false; render(); }; speechSynthesis.speak(u); });
+  }
+}
+
 /* ---------------- stars, sharing, chapter list, manuscript, shortcuts ---------------- */
 function isStarred(c) { return !!c && c.extra && String(c.extra.starred) === 'true'; }
 async function toggleStar(path) {
@@ -2144,6 +2231,8 @@ function bind() {
     const th = t.closest('[data-settheme]'); if (th) { const v = th.dataset.settheme; localStorage.setItem('cardeck.theme', v); if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; $$('[data-settheme]').forEach(b => b.setAttribute('aria-pressed', b === th)); return; }
     const bm = t.closest('[data-btmenu]'); if (bm) { const b = curBook(); const [ci, ii] = bm.dataset.btmenu.split(':').map(Number); b && cardMenu(bm, b, ci, ii); return; }
     const cm = t.closest('[data-chmenu]'); if (cm) { const b = curBook(); b && chapterMenu(cm, b, +cm.dataset.chmenu); return; }
+    const bt = t.closest('[data-btab]'); if (bt) { const b = curBook(); if (b) { S.bookTabs = S.bookTabs || {}; S.bookTabs[b.path] = bt.dataset.btab; S.draftEdit = null; if (S.speaking) { speechSynthesis.cancel(); S.speaking = false; } render(); } return; }
+    const dg = t.closest('[data-drgo]'); if (dg) { const sec = $(`#dr-${dg.dataset.drgo}`); sec && sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
     const tj = t.closest('[data-tocgo]'); if (tj) { closePanel(); const ci = +tj.dataset.tocgo; if (S.compact) { S.openCh = S.openCh || new Set(); S.openCh.add(ci); render(); } setTimeout(() => { const sec = $(`#ch-${ci}`); sec && sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); S.coach && S.coach.open && focusChapter(ci); }, 300); return; }
     const tb = t.closest('#tabbar [data-tab]'); if (tb && tb.getAttribute('aria-current') === 'page' && tb.tagName === 'A') { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
     const cc = t.closest('.chapter.collapsed .ch-head'); if (cc && !t.closest('[data-chmenu]')) { const ci = +cc.closest('.chapter').dataset.ch; S.openCh = S.openCh || new Set(); S.openCh.add(ci); cc.closest('.chapter').classList.remove('collapsed'); return; }
@@ -2164,6 +2253,7 @@ function bind() {
       case 'ms-notes': S.msNotes = !S.msNotes; render(); break;
       case 'keys': showKeys(); break;
       case 'tab-boxes': toggleDrawer(true); break;
+      case 'draft-new': case 'draft-edit': case 'draft-cancel': case 'draft-save': case 'draft-copy': case 'draft-md': case 'draft-listen': draftAct(a.dataset.act, a); break;
       case 'p-share': case 'p-copy': case 'p-next': case 'p-posted': postAct(a.dataset.act, a); break;
       case 'q-share': case 'q-copy': case 'q-image': case 'q-next': case 'q-save': quoteAct(a.dataset.act); break;
       case 'paste-link': { let t = ''; try { t = await navigator.clipboard.readText(); } catch (_) { } if (t && t.includes('connect=')) { useLink(t, $('#paste-msg')); } else { setupLink(); } break; }

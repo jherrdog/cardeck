@@ -1,7 +1,7 @@
 /* CARDECK service worker: keeps the app itself available offline.
    Your cards never pass through here; they live in IndexedDB and on GitHub.
    The app's own files load from the network first (so updates arrive at once) and fall back to the cache offline. */
-const CACHE = 'cardeck-app-v1.5.0';
+const CACHE = 'cardeck-app-v1.6.0';
 const FILES = ['./', './index.html', './app.css', './app.js', './manifest.webmanifest',
   './fonts/source-serif-4.woff2', './fonts/source-serif-4-italic.woff2', './fonts/caveat-600.woff2',
   './icons/deck-180.png', './icons/deck-192.png', './icons/deck-512.png', './icons/deck-512-maskable.png', './icons/deck-favicon-64.png'];
