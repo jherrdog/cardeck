@@ -3,7 +3,8 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
+try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
 const TYPE_PLURAL = { all: 'All', idea: 'Ideas', quote: 'Quotes', story: 'Stories', fact: 'Facts', question: 'Questions' };
@@ -312,12 +313,13 @@ function allBoxes() {
 }
 function boxInfo(name) { return allBoxes().find(b => b.name === name) || { name, description: '', hue: hueFor(name) }; }
 function counts() {
-  const box = new Map(), proj = new Map(); let inbox = 0;
+  const box = new Map(), proj = new Map(); let inbox = 0, starred = 0;
   for (const c of S.cards.values()) {
     if (!c.box) inbox++; else box.set(c.box, (box.get(c.box) || 0) + 1);
     for (const p of c.projects) proj.set(p, (proj.get(p) || 0) + 1);
+    if (isStarred(c)) starred++;
   }
-  return { box, proj, inbox, total: S.cards.size };
+  return { box, proj, inbox, starred, total: S.cards.size };
 }
 
 /* ---------------- sync status ---------------- */
@@ -505,6 +507,9 @@ function parseHash() {
   if (h.startsWith('connect=')) return { kind: 'connect', data: location.hash.split('connect=')[1] };
   if (h === 'all') return { kind: 'all' };
   if (h === 'inbox') return { kind: 'inbox' };
+  if (h === 'starred') return { kind: 'starred' };
+  if (h.startsWith('compile/book/')) return { kind: 'compile', doc: 'book', name: h.slice(13) };
+  if (h.startsWith('compile/series/')) return { kind: 'compile', doc: 'series', name: h.slice(15) };
   if (h.startsWith('box/')) return { kind: 'box', name: h.slice(4) };
   if (h.startsWith('project/')) return { kind: 'project', name: h.slice(8) };
   if (h.startsWith('card/')) return { kind: 'card', path: h.slice(5) };
@@ -516,7 +521,8 @@ function parseHash() {
   return { kind: 'desk' };
 }
 function hashFor(v) {
-  if (v.kind === 'all') return '#/all'; if (v.kind === 'inbox') return '#/inbox';
+  if (v.kind === 'all') return '#/all'; if (v.kind === 'inbox') return '#/inbox'; if (v.kind === 'starred') return '#/starred';
+  if (v.kind === 'compile') return `#/compile/${v.doc}/` + encodeURIComponent(v.name);
   if (v.kind === 'box') return '#/box/' + encodeURIComponent(v.name);
   if (v.kind === 'project') return '#/project/' + encodeURIComponent(v.name);
   if (v.kind === 'books') return LEX[v.doc].allHash;
@@ -527,6 +533,7 @@ function tokens() { return (S.q.toLowerCase().match(/"[^"]+"|\S+/g) || []).map(t
 function baseList(v) {
   const all = [...S.cards.values()];
   if (v.kind === 'inbox') return all.filter(c => !c.box);
+  if (v.kind === 'starred') return all.filter(isStarred);
   if (v.kind === 'box') return all.filter(c => c.box === v.name || c.also.includes(v.name));
   if (v.kind === 'project') return all.filter(c => c.projects.includes(v.name));
   return all;
@@ -567,7 +574,7 @@ function tileHTML(c, toks = [], cls = '') {
   const flag = c.quoted.length ? c.quoted[0] : '';
   return `<button class="tile ${c.type === 'quote' ? 'is-quote' : ''} ${cls}" data-path="${esc(c.path)}" aria-label="${esc(c.title)}">`
     + `<span class="corner">${esc(corner)}</span>`
-    + `<span class="tile-title" style="display:block">${hl(c.title, toks)}</span>`
+    + `<span class="tile-title" style="display:block">${isStarred(c) ? '<span class="star-mark" aria-label="Starred">★</span>' : ''}${hl(c.title, toks)}</span>`
     + `<span class="tile-text">${hl(excerpt(c, toks, cls === 'daycard' ? 900 : 420), toks)}</span>`
     + (flag && cls !== 'daycard' ? `<span class="tile-flag">${esc(flag)}</span>` : '')
     + (c.date ? `<span class="tile-date">${esc(fmtDate(c.date))}</span>` : '')
@@ -591,6 +598,7 @@ function renderNav() {
     <a class="nav-item" href="#/" ${cur('desk')}>${icon('desk')}Desk</a>
     <a class="nav-item" href="#/inbox" ${cur('inbox')}>${icon('inbox')}Inbox${cn.inbox ? `<span class="badge">${num(cn.inbox)}</span>` : ''}</a>
     <a class="nav-item" href="#/all" ${cur('all')}>${icon('stack')}All cards<span class="count">${num(cn.total)}</span></a>
+    <a class="nav-item" href="#/starred" ${cur('starred')}>${icon('star')}Starred<span class="count">${num(cn.starred)}</span></a>
     ${['book', 'series'].map(d => `<a class="nav-item" href="${LEX[d].allHash}" ${(v.kind === 'books' || v.kind === 'book') && v.doc === d && !S.q ? 'aria-current="page"' : ''}>${icon(d === 'book' ? 'book' : 'pulpit')}${LEX[d].tab}<span class="count">${num(sortedBooks(d).length)}</span></a>`).join('')}`;
   $('#nav-boxes').innerHTML = `<div class="nav-head"><span>Boxes</span></div>` + allBoxes().map(b =>
     `<a class="nav-item" href="${hashFor({ kind: 'box', name: b.name })}" ${cur('box', b.name)}><span class="tab" style="--h:${b.hue}"></span>${esc(b.name)}<span class="count">${num(cn.box.get(b.name) || 0)}</span></a>`).join('');
@@ -603,6 +611,10 @@ function render() {
   renderMain();
   if (S.coach && S.coach.open) { renderCoach(); observeChapters(); if (S.view.kind === 'book') focusChapter(S.coach.ci || 0); }
   const cb = $('#coach-btn'); if (cb) cb.setAttribute('aria-pressed', !!(S.coach && S.coach.open));
+  const k = S.view.kind, d = S.view.doc;
+  const tab = k === 'desk' ? 'desk' : (k === 'books' || k === 'book' || k === 'compile') ? (d === 'series' ? 'sermons' : 'books') : 'boxes';
+  $$('#tabbar [data-tab]').forEach(b => b.setAttribute('aria-current', b.dataset.tab === tab ? 'page' : 'false'));
+  document.body.dataset.view = k;
 }
 function renderMain() {
   renderNav();
@@ -614,6 +626,7 @@ function renderMain() {
   if (S.view.kind === 'desk') return renderDesk(el);
   if (S.view.kind === 'books') return renderBooks(el, S.view.doc);
   if (S.view.kind === 'book') { const b = curBook(); if (b) return renderBook(el, b); return renderBooks(el, S.view.doc); }
+  if (S.view.kind === 'compile') { const b = bookByName(S.view.name, S.view.doc); if (b) return renderCompile(el, b); return renderBooks(el, S.view.doc); }
   renderList(el);
 }
 function renderLoading() {
@@ -637,6 +650,7 @@ function renderList(el) {
   if (v.kind === 'inbox') { title = 'Inbox'; sub = 'New cards wait here. Give each one a box when it still matters a week later.'; }
   if (v.kind === 'box') { const b = boxInfo(v.name); title = b.name; sub = b.description || ''; hue = b.hue; }
   if (v.kind === 'project') { title = v.name; sub = 'Cards pulled into this project.'; }
+  if (v.kind === 'starred') { title = 'Starred'; sub = 'The cards you marked with a star. Tap the star on any open card to add it here.'; }
   const base = baseList(v);
   const typeCounts = {}; for (const c of base) typeCounts[c.type] = (typeCounts[c.type] || 0) + 1;
   const filtered = S.type === 'all' ? base : base.filter(c => c.type === S.type);
@@ -651,7 +665,7 @@ function renderList(el) {
     <select class="select" id="sort">${[['new', 'Newest first'], ['old', 'Oldest first'], ['az', 'A to Z'], ['shuffle', 'Shuffled']].map(([k, l]) => `<option value="${k}" ${S.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`);
   if (!list.length) {
     el.insertAdjacentHTML('beforeend', v.kind === 'inbox' ? `<div class="empty"><h3>Inbox zero</h3><p>Every card has a box. New cards you write land here first.</p><button class="btn btn-primary" data-act="new">${icon('plus')}New card</button></div>`
-      : `<div class="empty"><h3>Nothing here yet</h3><p>Cards you file in this box will show up here.</p><button class="btn btn-primary" data-act="new">${icon('plus')}New card</button></div>`);
+      : v.kind === 'starred' ? `<div class="empty"><h3>No starred cards yet</h3><p>Open any card and tap the star. Your favorites collect here.</p></div>` : `<div class="empty"><h3>Nothing here yet</h3><p>Cards you file in this box will show up here.</p><button class="btn btn-primary" data-act="new">${icon('plus')}New card</button></div>`);
     return;
   }
   renderGrid(el, list);
@@ -690,6 +704,7 @@ function renderDesk(el) {
     </section>
     ${otd.length ? `<section class="desk-section"><div class="section-head"><h2>${otdLabel}</h2><p>${fmtDate(today(), true).replace(/,? \d{4}$/, '')}, in years past</p></div><div class="strip">${otd.map(c => tileHTML(c)).join('')}</div></section>` : ''}
     ${recent.length ? `<section class="desk-section"><div class="section-head"><h2>Recently edited</h2><p>On this device</p></div><div class="strip">${recent.map(c => tileHTML(c)).join('')}</div></section>` : ''}
+    ${(() => { const st = [...S.cards.values()].filter(isStarred).sort((x, y) => (y.edited || 0) - (x.edited || 0)).slice(0, 12); return st.length ? `<section class="desk-section"><div class="section-head"><h2>Starred</h2><p><a class="crumb" href="#/starred">See all</a></p></div><div class="strip">${st.map(c => tileHTML(c)).join('')}</div></section>` : ''; })()}
     ${S.books.size ? `<section class="desk-section"><div class="section-head"><h2>On the floor</h2><p>Book ideas and sermon series you’re arranging</p></div><div class="covers covers-strip">${sortedBooks().slice(0, 8).map(coverHTML).join('')}</div></section>` : ''}
     <section class="desk-section"><div class="section-head"><h2>Your boxes</h2><p>Pick one and flip through it.</p></div>
       <div class="dividers">${allBoxes().map(x => `<a class="divider" href="${hashFor({ kind: 'box', name: x.name })}" style="--h:${x.hue}"><span class="divider-tab">${esc(x.name)}</span><span class="divider-body"><span class="divider-name">${esc(x.name)}</span><span class="divider-desc">${esc(x.description || '')}</span><span class="divider-count">${num(cn.box.get(x.name) || 0)} cards</span></span></a>`).join('')}</div>
@@ -754,7 +769,7 @@ function renderReader() {
   if (r.editing) return renderEditor();
   const c = S.cards.get(r.path); if (!c) return hideOverlay();
   const { prev, next } = neighbors();
-  rd.innerHTML = `<div class="reader-inner"><div class="flip ${r.flipped ? 'flipped' : ''}"><div class="flipper">
+  rd.innerHTML = `<div class="reader-grab" aria-hidden="true"><span></span></div><div class="reader-inner"><div class="flip ${r.flipped ? 'flipped' : ''}"><div class="flipper">
       <div class="face front"><article class="bigcard ${c.type === 'quote' ? 'is-quote' : ''}">
         <span class="corner">${esc(c.box || 'Inbox')}</span>
         <div class="big-head"><h1 class="big-title">${esc(c.title)}</h1></div>
@@ -766,10 +781,12 @@ function renderReader() {
   dk.innerHTML = `
     <button data-act="close" aria-label="Close">${icon('x')}<span class="lbl">Close</span></button>
     <span class="sep"></span>
-    <button data-act="prev" aria-label="Previous card" ${prev ? '' : 'disabled'}>${icon('left')}</button>
-    <button data-act="next" aria-label="Next card" ${next ? '' : 'disabled'}>${icon('right')}</button>
-    <button data-act="draw" aria-label="Draw a random card">${icon('shuffle')}<span class="lbl">Draw</span></button>
+    <button class="wide-only" data-act="prev" aria-label="Previous card" ${prev ? '' : 'disabled'}>${icon('left')}</button>
+    <button class="wide-only" data-act="next" aria-label="Next card" ${next ? '' : 'disabled'}>${icon('right')}</button>
+    <button class="wide-only" data-act="draw" aria-label="Draw a random card">${icon('shuffle')}<span class="lbl">Draw</span></button>
     <button data-act="flip" aria-label="Flip card" aria-pressed="${r.flipped}">${icon('flip')}<span class="lbl">${r.flipped ? 'Front' : 'Back'}</span></button>
+    <button data-act="star" aria-label="${isStarred(c) ? 'Unstar' : 'Star'} this card" aria-pressed="${isStarred(c)}" class="star-btn">${icon('star')}</button>
+    <button data-act="share" aria-label="Share or copy this card">${icon('share')}</button>
     <button data-act="add-to-book" aria-label="Add to a book idea or sermon series">${icon('book')}<span class="lbl">Add to…</span></button>
     <span class="sep"></span>
     <button class="primary" data-act="edit">${icon('pen')}<span class="lbl">Edit</span></button>`;
@@ -935,8 +952,8 @@ function renderBook(el, b) {
     let head = '';
     if (ch.part && ch.part !== part) head = `<h2 class="part">${esc(ch.part)}</h2>`;
     part = ch.part || part;
-    return `${head}<section class="chapter" data-ch="${ci}">
-      <header class="ch-head"><span class="ch-num" aria-hidden="true">${b.doc === 'series' && label ? '<small>week</small>' : ''}${label}</span><div class="ch-text"><h3 class="ch-title">${esc(ch.title)}</h3>${ch.note ? `<div class="ch-spine">${renderMd(ch.note)}</div>` : ''}${ch.needs ? `<p class="ch-needs"><b>${L.needs}:</b> ${esc(ch.needs)}</p>` : ''}</div>
+    return `${head}<section class="chapter ${S.compact && !(S.openCh && S.openCh.has(ci)) ? 'collapsed' : ''}" data-ch="${ci}" id="ch-${ci}">
+      <header class="ch-head"><span class="ch-num" aria-hidden="true">${b.doc === 'series' && label ? '<small>week</small>' : ''}${label}</span><div class="ch-text"><h3 class="ch-title">${esc(ch.title)}<span class="ch-count">${ch.items.length} ${ch.items.length === 1 ? 'card' : 'cards'}</span></h3>${ch.note ? `<div class="ch-spine">${renderMd(ch.note)}</div>` : ''}${ch.needs ? `<p class="ch-needs"><b>${L.needs}:</b> ${esc(ch.needs)}</p>` : ''}</div>
         <button class="icon-btn ch-more" data-chmenu="${ci}" aria-label="${L.Unit} options">${icon('dots')}</button></header>
       <div class="ch-cards" data-ch="${ci}">${ch.items.map((it, ii) => btileHTML(b, ci, ii, it)).join('')}<button class="add-tile" data-addcards="${ci}">${icon('plus')}Add cards</button></div>
     </section>`;
@@ -944,6 +961,7 @@ function renderBook(el, b) {
   el.innerHTML = `<div class="view-head"><div><a class="crumb" href="${L.allHash}">${L.tab}</a><h1 class="view-title">${esc(b.title)}</h1>${b.subtitle ? `<p class="view-sub book-sub">${esc(b.subtitle)}</p>` : ''}
       <div class="book-meta"><span>${num(n.chapters)} ${L.units}</span><span>${num(n.cards)} cards</span><label class="sr" for="book-status">Stage</label><select class="select" id="book-status">${L.status.map(([k, l]) => `<option value="${k}" ${b.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
     <div class="view-actions">${S.list.length ? `<button class="btn" data-act="book-read">${icon('stack')}Read in order</button><button class="btn" data-act="draw">${icon('shuffle')}Draw</button>` : ''}<button class="btn" data-act="edit-book">${icon('pen')}Edit ${L.pitch.toLowerCase().replace(/^the /, '')}</button><button class="btn btn-coach" data-act="coach">${icon('spark')}Coach</button></div></div>
+    <div class="book-tools"><button class="btn btn-quiet" data-act="toc">${icon('list')}Chapters</button><button class="btn btn-quiet" data-act="compact" aria-pressed="${!!S.compact}">${icon('rows')}${S.compact ? 'Show cards' : 'Outline only'}</button><button class="btn btn-quiet" data-act="compile">${icon('doc')}Read as manuscript</button></div>
     ${b.pitch ? `<details class="pitch" ${b.chapters.length ? '' : 'open'}><summary>${L.pitch}</summary><div class="pitch-body">${renderMd(b.pitch)}</div></details>` : ''}
     <p class="book-hint">Drag a card to move it${matchMedia('(pointer: coarse)').matches ? ' (press and hold first)' : ''}, or use ${icon('grip', 'ico inline')} on any card.</p>
     ${chapters || `<div class="empty"><h3>No ${L.units} yet</h3><p>Add a ${L.unit}, then pull cards into it.</p></div>`}
@@ -1418,6 +1436,85 @@ function bindCoach() {
   document.addEventListener('click', e => { if (!S.coach || !S.coach.open) return; const sec = e.target.closest('.chapter[data-ch]'); if (sec && !e.target.closest('.tile,[data-btmenu],[data-chmenu]')) focusChapter(+sec.dataset.ch); });
 }
 
+/* ---------------- stars, sharing, chapter list, manuscript, shortcuts ---------------- */
+function isStarred(c) { return !!c && c.extra && String(c.extra.starred) === 'true'; }
+async function toggleStar(path) {
+  const c = S.cards.get(path); if (!c) return;
+  const on = !isStarred(c);
+  if (on) { c.extra.starred = 'true'; if (!c.extraOrder.includes('starred')) c.extraOrder.push('starred'); }
+  else { delete c.extra.starred; c.extraOrder = c.extraOrder.filter(k => k !== 'starred'); }
+  c.text = serialize(c); c.edited = Date.now(); S.cards.set(path, c); await DB.putCards([c]);
+  if (S.gh) await queue({ kind: 'put', path, text: c.text, sha: c.sha, msg: `${on ? 'Star' : 'Unstar'} card: ${c.title}` });
+  const b = $('[data-act="star"]'); if (b) { b.setAttribute('aria-pressed', on); b.setAttribute('aria-label', `${on ? 'Unstar' : 'Star'} this card`); b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop'); }
+  renderNav(); toast(on ? 'Starred' : 'Removed from Starred');
+}
+function cardText(c) { return `${c.title}\n\n${plain(c.body).length ? c.body.replace(/\*\*/g, '') : ''}${c.quoted.length ? `\n\n— ${c.quoted.join(', ')}` : ''}${c.date ? `\n\n(${fmtDate(c.date, true)})` : ''}`; }
+async function shareCard(path) {
+  const c = S.cards.get(path); if (!c) return;
+  const text = cardText(c);
+  if (navigator.share) { try { await navigator.share({ title: c.title, text }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+  try { await navigator.clipboard.writeText(text); toast('Card copied. Paste it anywhere.'); } catch (_) { toast('Sharing isn’t available here.'); }
+}
+function openToc(b) {
+  const L = lex(b); let part = null, n = 0;
+  const rows = b.chapters.map((ch, ci) => {
+    let h = ''; if (ch.part && ch.part !== part) { h = `<div class="toc-part">${esc(ch.part)}</div>`; part = ch.part; }
+    const front = isFront(ch); const label = front ? '' : String(++n);
+    return `${h}<button class="toc-row" data-tocgo="${ci}"><span class="toc-n">${label}</span><span class="toc-t">${esc(ch.title)}</span><span class="toc-c">${ch.items.length}</span></button>`;
+  }).join('');
+  openPanel(`${panelHead(L.units[0].toUpperCase() + L.units.slice(1))}<p class="muted">${esc(b.title)}: tap one to jump there.</p><div class="toc">${rows}</div>`);
+}
+function msParts(b) {
+  const out = []; let part = null;
+  for (const ch of b.chapters) {
+    if (ch.part && ch.part !== part) { out.push({ kind: 'part', text: ch.part }); part = ch.part; }
+    out.push({ kind: 'ch', ch, cards: ch.items.map(it => S.cards.get(it.path)).filter(Boolean) });
+  }
+  return out;
+}
+function manuscriptMd() {
+  const b = bookByName(S.view.name, S.view.doc); if (!b) return '';
+  const L = [`# ${b.title}`]; if (b.subtitle) L.push(`*${b.subtitle}*`); L.push('');
+  for (const x of msParts(b)) {
+    if (x.kind === 'part') { L.push(`## ${x.text}`, ''); continue; }
+    L.push(`### ${x.ch.title}`, '');
+    if (S.msNotes && x.ch.note) L.push(`> ${plain(x.ch.note)}`, '');
+    for (const c of x.cards) { if (S.msTitles) L.push(`**${c.title}**`, ''); L.push(c.body.trim(), ''); }
+  }
+  return L.join('\n').replace(/\n{3,}/g, '\n\n');
+}
+function downloadManuscript() {
+  const b = bookByName(S.view.name, S.view.doc); if (!b) return;
+  const blob = new Blob([manuscriptMd()], { type: 'text/markdown' }); const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `${safeName(b.title) || 'Manuscript'}.md`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+function renderCompile(el, b) {
+  const L = lex(b); if (S.msTitles === undefined) S.msTitles = true;
+  const parts = msParts(b); S.list = bookOrder(b);
+  let words = 0; for (const x of parts) if (x.cards) for (const c of x.cards) words += (plain(c.body).match(/\S+/g) || []).length;
+  let n = 0;
+  const body = parts.map(x => {
+    if (x.kind === 'part') return `<h2 class="ms-part">${esc(x.text)}</h2>`;
+    const label = isFront(x.ch) ? '' : `<span class="ms-num">${L.Unit} ${++n}</span>`;
+    return `<section class="ms-ch">${label}<h3 class="ms-title">${esc(x.ch.title)}</h3>${S.msNotes && x.ch.note ? `<div class="ms-note">${renderMd(x.ch.note)}</div>` : ''}
+      ${x.cards.length ? x.cards.map(c => `<div class="ms-card" data-open="${esc(c.path)}">${S.msTitles ? `<h4>${esc(c.title)}</h4>` : ''}${renderMd(c.body)}</div>`).join('') : `<p class="ms-empty">No cards yet.</p>`}</section>`;
+  }).join('');
+  el.innerHTML = `<div class="view-head ms-head"><div><a class="crumb" href="${bookHash(b)}">${esc(b.title)}</a><h1 class="view-title">Manuscript</h1>
+      <p class="view-sub">Your ${esc(L.units)} with every card in order, as one piece of writing. About ${num(words)} words, a ${Math.max(1, Math.round(words / 230))}-minute read. Tap any passage to open its card.</p></div>
+    <div class="view-actions"><button class="btn" data-act="print">${icon('doc')}Print or save PDF</button><button class="btn" data-act="ms-md">Download .md</button><button class="btn" data-act="ms-copy">Copy</button></div></div>
+    <div class="book-tools"><button class="btn btn-quiet" data-act="ms-titles" aria-pressed="${!!S.msTitles}">${S.msTitles ? 'Hide' : 'Show'} card titles</button><button class="btn btn-quiet" data-act="ms-notes" aria-pressed="${!!S.msNotes}">${S.msNotes ? 'Hide' : 'Show'} ${esc(L.unit)} notes</button></div>
+    <article class="manuscript"><header class="ms-cover"><h1>${esc(b.title)}</h1>${b.subtitle ? `<p>${esc(b.subtitle)}</p>` : ''}</header>${body}</article>`;
+}
+function showKeys() {
+  const d = $('#dialog');
+  d.innerHTML = `<h3>Shortcuts</h3><div class="kbd-list"><kbd>/</kbd><span>Search</span><kbd>N</kbd><span>New card</span><kbd>R</kbd><span>Draw a random card</span><kbd>C</kbd><span>Writing coach</span><kbd>← →</kbd><span>Previous and next card</span><kbd>E</kbd><span>Edit the open card</span><kbd>F</kbd><span>Flip to the back</span><kbd>S</kbd><span>Star the open card</span><kbd>Ctrl/⌘ Enter</kbd><span>Save card or add an idea</span><kbd>Esc</kbd><span>Close</span></div>
+    <p class="muted">Touch: swipe left or right on an open card to move through the deck, swipe down or tap outside the card to close it.</p><div class="prow"><button class="pbtn primary" data-r="ok">Got it</button></div>`;
+  d.hidden = false;
+  const done = () => { d.hidden = true; document.removeEventListener('keydown', key, true); };
+  const key = e => { if (e.key === 'Escape' || e.key === '?') { e.stopPropagation(); e.preventDefault(); done(); } };
+  document.addEventListener('keydown', key, true); $('[data-r="ok"]', d).addEventListener('click', done); $('[data-r="ok"]', d).focus();
+}
+
 /* drag cards between sections: mouse drags at once; touch drags after a short press */
 let drag = null, suppressClick = 0;
 function dragStart() {
@@ -1686,11 +1783,15 @@ function openSettings() {
     : `<h3>Sync</h3><p>Your cards are stored in this browser only.</p><div class="prow"><button class="pbtn primary" data-act="setup-github">Connect GitHub</button></div>`}
     <h3>Appearance</h3>
     <div class="seg" role="group" aria-label="Theme">${[['auto', 'Match my device'], ['day', 'Day'], ['night', 'Night']].map(([k, l]) => `<button type="button" data-settheme="${k}" aria-pressed="${theme === k}">${l}</button>`).join('')}</div>
+    <h3>Reading</h3>
+    <p class="muted">Text size for cards, outlines and the manuscript view.</p>
+    <div class="seg" role="group" aria-label="Text size">${[['s', 'Small'], ['m', 'Medium'], ['l', 'Large'], ['xl', 'Extra large']].map(([k, l]) => `<button type="button" data-act="setsize" data-size="${k}" aria-pressed="${(document.documentElement.dataset.size || 'm') === k}">${l}</button>`).join('')}</div>
     <h3>Your data</h3>
     <p class="muted">Everything is plain Markdown. Download a copy any time; it opens in Obsidian or any text editor.</p>
     <div class="prow"><button class="pbtn" data-act="export">Download all cards (.zip)</button>${S.cards.size ? '<button class="pbtn" data-act="import-outlines">Import more cards, book ideas or sermon series</button>' : '<button class="pbtn" data-act="import">Import cards</button>'}</div>
     <h3>Keyboard</h3>
-    <div class="kbd-list"><kbd>/</kbd><span>Search</span><kbd>N</kbd><span>New card</span><kbd>R</kbd><span>Draw a random card</span><kbd>← →</kbd><span>Previous and next card</span><kbd>E</kbd><span>Edit the open card</span><kbd>F</kbd><span>Flip to the back</span><kbd>Ctrl/⌘ Enter</kbd><span>Save card</span><kbd>Esc</kbd><span>Close</span></div>
+    <div class="kbd-list"><kbd>/</kbd><span>Search</span><kbd>N</kbd><span>New card</span><kbd>R</kbd><span>Draw a random card</span><kbd>← →</kbd><span>Previous and next card</span><kbd>E</kbd><span>Edit the open card</span><kbd>F</kbd><span>Flip to the back</span><kbd>S</kbd><span>Star the open card</span><kbd>C</kbd><span>Writing coach</span><kbd>?</kbd><span>All shortcuts</span><kbd>Ctrl/⌘ Enter</kbd><span>Save card</span><kbd>Esc</kbd><span>Close</span></div>
+    <p class="muted">On iPhone and iPad: swipe left or right on an open card to move through the deck, swipe down to close it, or tap anywhere outside the card.</p>
     <h3>This device</h3>
     <div class="prow"><button class="pbtn red" data-act="disconnect">Remove CARDECK from this device</button></div>
     <p class="muted" style="margin-top:24px">CARDECK ${VERSION}</p>`);
@@ -1796,6 +1897,16 @@ function bind() {
     if (S.reader.editing && !S.reader.isNew) { $('[data-act="cancel"]') && $('[data-act="cancel"]').click(); return; }
     closeReader();
   });
+  // swipe on an open card: left/right for next/previous, down to close
+  let sw = null;
+  $('#reader').addEventListener('touchstart', e => { if (!S.reader || S.reader.editing || e.touches.length !== 1) { sw = null; return; } const t0 = e.touches[0]; sw = { x: t0.clientX, y: t0.clientY, t: Date.now(), top: $('#reader').scrollTop }; }, { passive: true });
+  $('#reader').addEventListener('touchend', e => {
+    if (!sw || !S.reader || S.reader.editing) { sw = null; return; }
+    const t1 = e.changedTouches[0], dx = t1.clientX - sw.x, dy = t1.clientY - sw.y, dt = Date.now() - sw.t; const top = sw.top; sw = null;
+    if (String(window.getSelection && window.getSelection()) || dt > 700) return;
+    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.6) { const n = dx < 0 ? neighbors().next : neighbors().prev; if (n) { $('#reader').classList.add(dx < 0 ? 'swipe-l' : 'swipe-r'); openReader(n, { replace: true }); setTimeout(() => $('#reader').classList.remove('swipe-l', 'swipe-r'), 260); } return; }
+    if (dy > 110 && Math.abs(dy) > Math.abs(dx) * 2 && top <= 2) closeReader();
+  }, { passive: true });
   $('#scrim').addEventListener('click', () => { if (!$('#panel').hidden) closePanel(); else if ($('#shell').classList.contains('drawer')) toggleDrawer(false); else if (S.reader) closeReader(); });
   $('#side').addEventListener('click', e => { if (e.target.closest('a')) toggleDrawer(false); });
 
@@ -1810,11 +1921,27 @@ function bind() {
     const th = t.closest('[data-settheme]'); if (th) { const v = th.dataset.settheme; localStorage.setItem('cardeck.theme', v); if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; $$('[data-settheme]').forEach(b => b.setAttribute('aria-pressed', b === th)); return; }
     const bm = t.closest('[data-btmenu]'); if (bm) { const b = curBook(); const [ci, ii] = bm.dataset.btmenu.split(':').map(Number); b && cardMenu(bm, b, ci, ii); return; }
     const cm = t.closest('[data-chmenu]'); if (cm) { const b = curBook(); b && chapterMenu(cm, b, +cm.dataset.chmenu); return; }
+    const tj = t.closest('[data-tocgo]'); if (tj) { closePanel(); const ci = +tj.dataset.tocgo; if (S.compact) { S.openCh = S.openCh || new Set(); S.openCh.add(ci); render(); } setTimeout(() => { const sec = $(`#ch-${ci}`); sec && sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); S.coach && S.coach.open && focusChapter(ci); }, 300); return; }
+    const tb = t.closest('#tabbar [data-tab]'); if (tb && tb.getAttribute('aria-current') === 'page' && tb.tagName === 'A') { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+    const cc = t.closest('.chapter.collapsed .ch-head'); if (cc && !t.closest('[data-chmenu]')) { const ci = +cc.closest('.chapter').dataset.ch; S.openCh = S.openCh || new Set(); S.openCh.add(ci); cc.closest('.chapter').classList.remove('collapsed'); return; }
     const ac = t.closest('[data-addcards]'); if (ac) { const b = curBook(); b && openPicker(b, +ac.dataset.addcards); return; }
     const pk = t.closest('[data-pick]'); if (pk) { pickCard(pk.dataset.pick); return; }
     const a = t.closest('[data-act]'); if (!a) return;
     switch (a.dataset.act) {
       case 'coach': coachOpen(true); break;
+      case 'star': if (S.reader) toggleStar(S.reader.path); break;
+      case 'share': if (S.reader) shareCard(S.reader.path); break;
+      case 'toc': { const b = curBook(); b && openToc(b); break; }
+      case 'compact': S.compact = !S.compact; S.openCh = new Set(); try { localStorage.setItem('cardeck.compact', S.compact ? '1' : ''); } catch (_) { } render(); break;
+      case 'compile': { const b = curBook(); if (b) location.hash = `#/compile/${b.doc}/` + encodeURIComponent(b.title); break; }
+      case 'print': window.print(); break;
+      case 'ms-md': downloadManuscript(); break;
+      case 'ms-copy': { try { await navigator.clipboard.writeText(manuscriptMd()); toast('Manuscript copied'); } catch (_) { toast('Copy isn’t allowed here. Use Download instead.'); } break; }
+      case 'ms-titles': S.msTitles = !S.msTitles; render(); break;
+      case 'ms-notes': S.msNotes = !S.msNotes; render(); break;
+      case 'keys': showKeys(); break;
+      case 'tab-boxes': toggleDrawer(true); break;
+      case 'setsize': { const z = a.dataset.size; try { localStorage.setItem('cardeck.size', z); } catch (_) { } document.documentElement.dataset.size = z; $$('[data-act="setsize"]').forEach(x => x.setAttribute('aria-pressed', x === a)); break; }
       case 'close': closeReader(); break;
       case 'prev': { const n = neighbors().prev; n && openReader(n, { replace: true }); break; }
       case 'next': { const n = neighbors().next; n && openReader(n, { replace: true }); break; }
@@ -1884,12 +2011,14 @@ function bind() {
       if (e.key === 'ArrowRight' || e.key === 'j') { const n = neighbors().next; if (n) openReader(n, { replace: true }); e.preventDefault(); return; }
       if (e.key === 'e') { e.preventDefault(); $('[data-act="edit"]').click(); return; }
       if (e.key === 'f') { $('[data-act="flip"]').click(); return; }
+      if (e.key === 's') { toggleStar(S.reader.path); return; }
     }
     if (S.reader && S.reader.editing) return;
     if (e.key === '/') { e.preventDefault(); if (S.reader) closeReader(); $('#q').focus(); }
     else if (e.key === 'n') { e.preventDefault(); openReader(null, { isNew: true, replace: !!S.reader }); }
     else if (e.key === 'r') { draw(); }
     else if (e.key === 'c') { e.preventDefault(); coachOpen(); }
+    else if (e.key === '?') { e.preventDefault(); showKeys(); }
   });
   window.addEventListener('online', () => sync({ quiet: true }));
   window.addEventListener('offline', syncIdle);
@@ -1906,6 +2035,7 @@ async function boot() {
   bind();
   try { await DB.open(); } catch (e) { view().innerHTML = `<div class="empty"><h3>This browser is blocking storage</h3><p>CARDECK keeps your cards on this device. Turn off private browsing, or allow site data for this page, then reload.</p></div>`; return; }
   saveSettings(loadSettings());
+  try { S.compact = !!localStorage.getItem('cardeck.compact'); } catch (_) { }
   await loadLocal();
   syncIdle();
   const h = parseHash();
