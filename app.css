@@ -724,3 +724,15 @@ mark { background: linear-gradient(transparent 12%, var(--marker) 12%, var(--mar
 .fb-text { white-space: pre-wrap; font: calc(16px * var(--fz))/1.5 var(--ui); outline: none; border-radius: 8px; padding: 2px 4px; margin: 0 -4px; }
 .fb-text:focus { background: #fff7f2; box-shadow: 0 0 0 2px rgba(255,95,31,.35); }
 .fb-hint { margin: 10px 0 0; font: 12px var(--ui); color: #8a8d91; }
+/* compact book & series buttons */
+.covers { grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 14px; }
+.covers-strip { grid-auto-columns: minmax(180px, 200px); gap: 14px; }
+.cover { aspect-ratio: auto; min-height: 118px; padding: 14px 14px 12px 24px; border-radius: 3px 10px 10px 3px; }
+.cover::after { inset: 8px 8px 8px 18px; }
+.cover-status { font-size: 15px; }
+.cover-title { font-size: calc(17.5px * var(--fz)); line-height: 1.15; margin-top: 6px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.cover-sub { font-size: 12.5px; margin-top: 4px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; overflow: hidden; }
+.cover-meta { font-size: 10.5px; gap: 10px; padding-top: 8px; }
+.cover:hover { transform: translateY(-2px); }
+@media (max-width: 560px) { .covers { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .cover { min-height: 104px; padding: 12px 10px 10px 20px; } .cover-sub { display: none; } }
+@media (max-width: 560px) { .cover { min-height: 0; padding: 10px 10px 9px 20px; } .cover-status { display: none; } .cover-title { font-size: calc(15.5px * var(--fz)); margin-top: 0; } .cover-meta { white-space: nowrap; gap: 8px; font-size: 10px; } }

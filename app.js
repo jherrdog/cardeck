@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
@@ -1634,7 +1634,7 @@ function postHTML() {
   const p = curPost(); if (!p) return '';
   const done = [...S.cards.values()].filter(c => c.extra && c.extra.posted).length, left = postPool().length;
   return `<section class="desk-section fbpost"><div class="section-head"><h2>Today’s post from your writing</h2><p>${left ? `${num(left)} ready` : 'From your starred cards'}${done ? ` · ${num(done)} posted` : ''}</p></div>
-    <div class="fb-card"><div class="fb-head"><img src="icons/orange-192.png" alt="" width="40" height="40"><div><b>Jeremy Herr</b><span>From your card “${esc(p.c.title)}”${p.c.date ? `, ${esc(fmtDate(p.c.date))}` : ''}</span></div></div>
+    <div class="fb-card"><div class="fb-head"><img src="icons/deck-192.png" alt="" width="40" height="40"><div><b>Jeremy Herr</b><span>From your card “${esc(p.c.title)}”${p.c.date ? `, ${esc(fmtDate(p.c.date))}` : ''}</span></div></div>
       <div class="fb-text" id="fb-text" contenteditable="true" spellcheck="true" aria-label="Post text you can edit">${esc(p.text)}</div>
       <p class="fb-hint">Tap the text to tweak it before you post.</p></div>
     <div class="row qrow"><button class="btn btn-primary" data-act="p-share">${icon('share')}Share to Facebook</button><button class="btn" data-act="p-copy">Copy post</button><button class="btn btn-quiet" data-act="p-next">${icon('shuffle')}Another</button><button class="btn btn-quiet" data-open="${esc(p.c.path)}">Open the card</button><button class="btn btn-quiet" data-act="p-posted" data-path="${esc(p.c.path)}">${icon('check')}I posted it</button></div></section>`;
