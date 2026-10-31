@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
 const TYPE_PLURAL = { all: 'All', idea: 'Ideas', quote: 'Quotes', story: 'Stories', fact: 'Facts', question: 'Questions' };
@@ -915,7 +915,7 @@ function btileHTML(b, ci, ii, it) {
   const c = resolveCard(b, it);
   const menu = `<button class="bt-menu" data-btmenu="${ci}:${ii}" aria-label="Move or remove this card">${icon('grip')}</button>`;
   const note = it.note ? `<p class="bnote">${esc(it.note)}</p>` : '';
-  if (!c) return `<div class="btile missing" data-ch="${ci}" data-idx="${ii}"><div class="bt-card"><div class="tile"><span class="tile-title">${esc(it.path.split('/').pop().replace(/\.md$/i, ''))}</span><span class="tile-text">This card isn’t in your deck any more. Remove it, or add it back.</span></div>${menu}</div>${note}</div>`;
+  if (!c) return `<div class="btile missing" data-ch="${ci}" data-idx="${ii}"><div class="bt-card"><div class="tile"><span class="tile-title">${esc(it.path.split('/').pop().replace(/\.md$/i, ''))}</span><span class="tile-text">This card isn’t in your deck yet. Import the file it came from, or remove it here.</span></div>${menu}</div>${note}</div>`;
   return `<div class="btile" data-ch="${ci}" data-idx="${ii}"><div class="bt-card">${tileHTML(c)}${menu}</div>${note}</div>`;
 }
 function renderBook(el, b) {
@@ -1140,11 +1140,24 @@ function bindDrag() {
   document.addEventListener('pointerdown', e => { const m = $('#menu'); if (m && !m.contains(e.target) && !e.target.closest('[data-btmenu],[data-chmenu],[data-act="add-to-book"]')) closeMenu(); }, true);
 }
 async function importBooks(data) {
-  const n = { book: 0, series: 0 };
+  const n = { book: 0, series: 0, added: 0 };
   for (const f of data.files) {
     if (!isBookPath(f.path)) continue;
-    const old = S.books.get(f.path); const b = makeBook(f.path, f.text, old ? old.sha : null); b.edited = Date.now();
-    S.books.set(f.path, b); await commitBook(f.path); n[b.doc]++;
+    const incoming = makeBook(f.path, f.text, null), old = S.books.get(f.path);
+    if (old) {
+      // Already have this outline: keep your order and edits, only add cards it doesn't have yet.
+      const have = new Set(old.chapters.flatMap(c => c.items.map(i => i.path)));
+      let added = 0;
+      for (const ch of incoming.chapters) {
+        const fresh = ch.items.filter(i => !have.has(i.path)); if (!fresh.length) continue;
+        let tgt = old.chapters.find(c => c.title === ch.title);
+        if (!tgt) { tgt = { ...ch, items: [] }; old.chapters.push(tgt); }
+        for (const it of fresh) { tgt.items.push(it); have.add(it.path); added++; }
+      }
+      if (added) { scheduleBookSave(old, 300); n.added += added; }
+      continue;
+    }
+    incoming.edited = Date.now(); S.books.set(f.path, incoming); await commitBook(f.path); n[incoming.doc]++;
   }
   return n;
 }
@@ -1505,7 +1518,8 @@ function bind() {
       if (data && data.format === 'cardeck-books' && Array.isArray(data.files)) {
         const n = await importBooks(data); closePanel();
         const parts = []; if (n.book) parts.push(`${n.book} book ${n.book === 1 ? 'idea' : 'ideas'}`); if (n.series) parts.push(`${n.series} sermon series`);
-        toast(parts.length ? `Added ${parts.join(' and ')}.` : 'That file had no book ideas or sermon series in it.');
+        if (n.added) parts.push(`${n.added} new cards to your outlines`);
+        toast(parts.length ? `Added ${parts.join(' and ')}.` : 'Everything in that file is already in your outlines.');
         location.hash = n.series && !n.book ? '#/sermons' : '#/books'; render(); return;
       }
       if ($('#panel').hidden || !$('#imp-status')) importScreen(); runImport(f);

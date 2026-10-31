@@ -439,6 +439,8 @@ mark { background: linear-gradient(transparent 12%, var(--marker) 12%, var(--mar
 .ch-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 18px 18px; margin: 14px 0 0 50px; padding: 6px; border-radius: 10px; min-height: 60px; transition: background .15s; }
 .btile { position: relative; touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .btile .tile { width: 100%; --clamp: 4; cursor: grab; }
+.ch-cards .tile .corner { font-size: 14px; top: 4px; max-width: 80%; }
+.ch-cards .tile-title { padding-right: 0; margin-top: 15px; font-size: 16px; }
 .btile.missing .tile { opacity: .55; border: 1px dashed var(--ink-soft); cursor: default; }
 .bt-card { position: relative; }
 .bt-menu { position: absolute; right: 6px; bottom: 6px; width: 30px; height: 30px; border-radius: 8px; border: 0; background: var(--card); color: var(--ink-soft); display: grid; place-items: center; opacity: .55; cursor: pointer; z-index: 2; }
@@ -482,8 +484,7 @@ mark { background: linear-gradient(transparent 12%, var(--marker) 12%, var(--mar
 @media (max-width: 700px) {
   .ch-cards { margin-left: 0; grid-template-columns: 1fr 1fr; gap: 12px; }
   .ch-cards .tile { --clamp: 3; }
-  .ch-cards .tile .corner { font-size: 15px; }
-  .ch-cards .tile-title { font-size: 15px; padding-right: 0; margin-top: 26px; }
+  .ch-cards .tile-title { font-size: 15px; }
   .ch-cards .tile-text { font-size: 13.5px; }
   .ch-cards .tile-flag { display: none; }
   .book-foot { margin-left: 0; }
