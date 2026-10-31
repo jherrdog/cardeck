@@ -3,7 +3,7 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
 const TYPE_PLURAL = { all: 'All', idea: 'Ideas', quote: 'Quotes', story: 'Stories', fact: 'Facts', question: 'Questions' };
@@ -85,6 +85,13 @@ const asStr = v => Array.isArray(v) ? v.join(', ') : (v || '');
 const unlink = s => { const m = /^\[\[([^\]|]+)(?:\|([^\]]+))?\]\]$/.exec(s); return m ? (m[2] || m[1]) : s; };
 const q = v => '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 
+function isBookPath(p) { return /^(Books|Sermons)\/[^/]+\.md$/i.test(p); }
+function isTracked(p) { return isCardPath(p) || isBookPath(p); }
+function makeDoc(path, text, sha, extra) { return isBookPath(path) ? makeBook(path, text, sha, extra) : makeCard(path, text, sha, extra); }
+function docGet(p) { return S.cards.get(p) || S.books.get(p); }
+function docSet(d) { (d.kind === 'book' ? S.books : S.cards).set(d.path, d); }
+function docDel(p) { S.cards.delete(p); S.books.delete(p); }
+function allDocs() { return [...S.cards.values(), ...S.books.values()]; }
 function isCardPath(p) { return /\.md$/i.test(p) && ((p.startsWith('Cards/') && p.split('/').length === 3) || (p.startsWith(INBOX + '/') && p.split('/').length === 2)); }
 function boxOf(p) { return p.startsWith('Cards/') ? p.split('/')[1] : ''; }
 function folderFor(box) { return box ? `Cards/${box}` : INBOX; }
@@ -126,6 +133,47 @@ function serialize(c) {
   }
   lines.push('---');
   return lines.join('\n') + '\n' + (c.body || '') + '\n';
+}
+/* A book idea is a Markdown file: the pitch, parts (#), chapters (##) with a spine paragraph, and an ordered list of card links. */
+function makeBook(path, text, sha, extra = {}) {
+  const { props, order, body } = parseFM(text);
+  const b = { kind: 'book', doc: /^Sermons\//i.test(path) ? 'series' : 'book', path, sha: sha || null, text, title: path.split('/').pop().replace(/\.md$/i, ''), subtitle: asStr(props.subtitle), status: asStr(props.status) || 'idea',
+    extra: {}, extraOrder: order.filter(k => !['type', 'subtitle', 'status'].includes(k)), pitch: '', chapters: [], edited: extra.edited || 0 };
+  for (const k of b.extraOrder) b.extra[k] = props[k];
+  let part = '', sec = null; const pitch = [];
+  const chapter = (title) => { const ch = { title, part, note: [], needs: '', items: [] }; b.chapters.push(ch); return ch; };
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, '');
+    let m;
+    if ((m = /^#\s+(.+)$/.exec(line))) { part = m[1].trim(); sec = null; continue; }
+    if ((m = /^##\s+(.+)$/.exec(line))) { sec = /^(the pitch|the big idea)$/i.test(m[1].trim()) ? 'pitch' : chapter(m[1].trim()); continue; }
+    if ((m = /^\s*[-*]\s+\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]\s*(?:[—–-]+\s*)?(.*)$/.exec(line))) {
+      const target = m[1].trim(); const item = { path: /\.md$/i.test(target) ? target : target + '.md', note: m[2].trim() };
+      if (!sec || sec === 'pitch') sec = chapter('Unsorted');
+      sec.items.push(item); continue;
+    }
+    if ((m = /^\*(?:Still needs|The thread):\*\s*(.*)$/.exec(line)) && sec && sec !== 'pitch') { sec.needs = m[1].trim(); continue; }
+    if (sec === 'pitch' || !sec) pitch.push(line); else sec.note.push(line);
+  }
+  b.pitch = pitch.join('\n').trim();
+  for (const ch of b.chapters) ch.note = ch.note.join('\n').trim();
+  return b;
+}
+function serializeBook(b) {
+  const X = LEX[b.doc || 'book']; const L = ['---', `type: ${X.type}`, `subtitle: ${q(b.subtitle || '')}`, `status: ${b.status || 'idea'}`];
+  for (const k of b.extraOrder) { const v = b.extra[k]; L.push(Array.isArray(v) ? `${k}: [${v.map(q).join(', ')}]` : `${k}: ${q(v)}`); }
+  L.push('---', `## ${X.pitch}`, '', b.pitch || '', '');
+  let part = null;
+  for (const ch of b.chapters) {
+    if ((ch.part || '') !== (part || '') && ch.part) L.push(`# ${ch.part}`, '');
+    part = ch.part || part;
+    L.push(`## ${ch.title || 'Untitled ' + X.unit}`, '');
+    if (ch.note) L.push(ch.note, '');
+    if (ch.needs) L.push(`*${X.needs}:* ${ch.needs}`, '');
+    for (const it of ch.items) L.push(`- [[${it.path.replace(/\.md$/i, '')}]]${it.note ? ' — ' + it.note : ''}`);
+    L.push('');
+  }
+  return L.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
 }
 function plain(md) {
   return md.replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2').replace(/\[\[([^\]]+)\]\]/g, '$1')
@@ -248,7 +296,7 @@ class GitHub {
 /* ---------------- state ---------------- */
 const S = {
   settings: null, gh: null,
-  cards: new Map(), boxes: [],
+  cards: new Map(), books: new Map(), boxes: [],
   view: { kind: 'desk' }, q: '', type: 'all', sort: 'new', seed: Math.random(),
   list: [], reader: null, outbox: 0,
   sync: { state: 'local', text: 'This device', last: 0, busy: false },
@@ -286,7 +334,8 @@ async function loadLocal() {
   const [rows, boxes, last] = await Promise.all([DB.all('cards'), DB.get('boxes'), DB.get('lastSync')]);
   S.boxes = boxes || [];
   S.sync.last = last || 0;
-  S.cards = new Map(rows.map(r => [r.path, makeCard(r.path, r.text, r.sha, { edited: r.edited })]));
+  S.cards = new Map(); S.books = new Map();
+  for (const r of rows) { if (!isTracked(r.path)) continue; const d = makeDoc(r.path, r.text, r.sha, { edited: r.edited }); docSet(d); }
   S.outbox = (await DB.all('outbox')).length;
 }
 async function pendingPaths() { return new Set((await DB.all('outbox')).map(o => o.path)); }
@@ -307,7 +356,7 @@ async function doSync({ quiet } = {}) {
     const tree = await S.gh.tree(commit.tree.sha);
     const remote = new Map(); const snaps = []; let boxesSha = null;
     for (const e of tree.tree) if (e.type === 'blob') {
-      if (isCardPath(e.path)) remote.set(e.path, e.sha);
+      if (isTracked(e.path)) remote.set(e.path, e.sha);
       else if (/^\.cardeck\/snapshot(-\d+)?\.json$/.test(e.path)) snaps.push(e);
       else if (e.path === '.cardeck/boxes.json') boxesSha = e.sha;
     }
@@ -316,8 +365,8 @@ async function doSync({ quiet } = {}) {
     }
     const pending = await pendingPaths();
     const need = [];
-    for (const [p, sha] of remote) { if (pending.has(p)) continue; const c = S.cards.get(p); if (!c || c.sha !== sha) need.push([p, sha]); }
-    const gone = [...S.cards.values()].filter(c => !remote.has(c.path) && !pending.has(c.path) && c.sha).map(c => c.path);
+    for (const [p, sha] of remote) { if (pending.has(p) || bookTimers.has(p)) continue; const c = docGet(p); if (!c || c.sha !== sha) need.push([p, sha]); }
+    const gone = allDocs().filter(c => !remote.has(c.path) && !pending.has(c.path) && !bookTimers.has(c.path) && c.sha).map(c => c.path);
     const changed = [];
     let snap = null;
     if (need.length > 40 && snaps.length) {
@@ -328,15 +377,15 @@ async function doSync({ quiet } = {}) {
     const fetchList = [];
     for (const [p, sha] of need) {
       const s = snap && snap.files && snap.files[p];
-      if (s && s.sha === sha) changed.push(makeCard(p, s.text, sha)); else fetchList.push([p, sha]);
+      if (s && s.sha === sha) changed.push(makeDoc(p, s.text, sha)); else fetchList.push([p, sha]);
     }
     if (S.loading) { S.loading.done = changed.length; renderLoading(); }
     await pool(fetchList, 6, async ([p, sha]) => {
-      const text = await S.gh.blob(sha); changed.push(makeCard(p, text, sha));
+      const text = await S.gh.blob(sha); changed.push(makeDoc(p, text, sha));
       if (S.loading) { S.loading.done++; if (S.loading.done % 25 === 0) renderLoading(); }
     });
-    for (const c of changed) { const old = S.cards.get(c.path); c.edited = old ? old.edited : 0; S.cards.set(c.path, c); }
-    for (const p of gone) S.cards.delete(p);
+    for (const c of changed) { const old = docGet(c.path); c.edited = old ? old.edited : 0; docSet(c); }
+    for (const p of gone) docDel(p);
     if (changed.length) await DB.putCards(changed);
     if (gone.length) await DB.delCards(gone);
     await DB.set('lastHead', head);
@@ -344,7 +393,7 @@ async function doSync({ quiet } = {}) {
     S.loading = null;
     if (changed.length || gone.length) render();
     syncIdle();
-    if (fetchList.length > 150) rebuildSnapshot(snaps.map(e => e.path)).catch(() => { });
+    if (fetchList.filter(([p]) => isCardPath(p)).length > 150) rebuildSnapshot(snaps.map(e => e.path)).catch(() => { });
   } catch (e) {
     S.loading = null;
     if (e.offline) setSync('offline', S.outbox ? `Offline, ${S.outbox} to save` : 'Offline');
@@ -366,14 +415,14 @@ async function flush() {
       setSync('busy', `Saving ${S.outbox}…`);
       try {
         if (op.kind === 'put') {
-          const cur = S.cards.get(op.path); let sha = cur ? cur.sha : op.sha;
+          const cur = docGet(op.path); let sha = cur ? cur.sha : op.sha;
           let r;
           try { r = await S.gh.put(op.path, op.text, sha, op.msg); }
           catch (e) {
             if (e.status !== 409 && e.status !== 422) throw e;
             const m = await S.gh.meta(op.path); r = await S.gh.put(op.path, op.text, m && m.sha, op.msg);
           }
-          const c = S.cards.get(op.path);
+          const c = docGet(op.path);
           if (c && c.text === op.text) { c.sha = r.content.sha; await DB.putCards([c]); }
         } else if (op.kind === 'del') {
           try { await S.gh.del(op.path, op.sha, op.msg); }
@@ -435,7 +484,7 @@ async function saveCard(draft, oldPath) {
   if (old && old.path === path && old.text === c.text) return old;
   S.cards.set(path, c);
   await DB.putCards([c]);
-  if (old && old.path !== path) { S.cards.delete(old.path); await DB.delCards([old.path]); }
+  if (old && old.path !== path) { S.cards.delete(old.path); await DB.delCards([old.path]); relinkBooks(old.path, path); }
   if (S.gh) {
     await queue({ kind: 'put', path, text: c.text, sha: c.sha, msg: old ? `Edit card: ${c.title}` : `New card: ${c.title}` });
     if (old && old.path !== path) await queue({ kind: 'del', path: old.path, sha: old.sha, msg: `Move card: ${c.title}` });
@@ -446,6 +495,7 @@ async function deleteCard(path) {
   const c = S.cards.get(path); if (!c) return;
   S.cards.delete(path); await DB.delCards([path]);
   if (S.gh) await queue({ kind: 'del', path, sha: c.sha, msg: `Delete card: ${c.title}` });
+  relinkBooks(path, null);
 }
 
 /* ---------------- views ---------------- */
@@ -459,12 +509,18 @@ function parseHash() {
   if (h.startsWith('project/')) return { kind: 'project', name: h.slice(8) };
   if (h.startsWith('card/')) return { kind: 'card', path: h.slice(5) };
   if (h === 'new') return { kind: 'new' };
+  if (h === 'books') return { kind: 'books', doc: 'book' };
+  if (h === 'sermons') return { kind: 'books', doc: 'series' };
+  if (h.startsWith('book/')) return { kind: 'book', doc: 'book', name: h.slice(5) };
+  if (h.startsWith('series/')) return { kind: 'book', doc: 'series', name: h.slice(7) };
   return { kind: 'desk' };
 }
 function hashFor(v) {
   if (v.kind === 'all') return '#/all'; if (v.kind === 'inbox') return '#/inbox';
   if (v.kind === 'box') return '#/box/' + encodeURIComponent(v.name);
   if (v.kind === 'project') return '#/project/' + encodeURIComponent(v.name);
+  if (v.kind === 'books') return LEX[v.doc].allHash;
+  if (v.kind === 'book') return LEX[v.doc].oneHash + encodeURIComponent(v.name);
   return '#/';
 }
 function tokens() { return (S.q.toLowerCase().match(/"[^"]+"|\S+/g) || []).map(t => t.replace(/^"|"$/g, '')).filter(Boolean); }
@@ -533,7 +589,8 @@ function renderNav() {
   $('#nav-main').innerHTML = `
     <a class="nav-item" href="#/" ${cur('desk')}>${icon('desk')}Desk</a>
     <a class="nav-item" href="#/inbox" ${cur('inbox')}>${icon('inbox')}Inbox${cn.inbox ? `<span class="badge">${num(cn.inbox)}</span>` : ''}</a>
-    <a class="nav-item" href="#/all" ${cur('all')}>${icon('stack')}All cards<span class="count">${num(cn.total)}</span></a>`;
+    <a class="nav-item" href="#/all" ${cur('all')}>${icon('stack')}All cards<span class="count">${num(cn.total)}</span></a>
+    ${['book', 'series'].map(d => `<a class="nav-item" href="${LEX[d].allHash}" ${(v.kind === 'books' || v.kind === 'book') && v.doc === d && !S.q ? 'aria-current="page"' : ''}>${icon(d === 'book' ? 'book' : 'pulpit')}${LEX[d].tab}<span class="count">${num(sortedBooks(d).length)}</span></a>`).join('')}`;
   $('#nav-boxes').innerHTML = `<div class="nav-head"><span>Boxes</span></div>` + allBoxes().map(b =>
     `<a class="nav-item" href="${hashFor({ kind: 'box', name: b.name })}" ${cur('box', b.name)}><span class="tab" style="--h:${b.hue}"></span>${esc(b.name)}<span class="count">${num(cn.box.get(b.name) || 0)}</span></a>`).join('');
   const projs = [...cn.proj.entries()].sort((a, b) => a[0].localeCompare(b[0]));
@@ -549,6 +606,8 @@ function render() {
   const toks = tokens();
   if (toks.length) return renderSearch(el, toks);
   if (S.view.kind === 'desk') return renderDesk(el);
+  if (S.view.kind === 'books') return renderBooks(el, S.view.doc);
+  if (S.view.kind === 'book') { const b = curBook(); if (b) return renderBook(el, b); return renderBooks(el, S.view.doc); }
   renderList(el);
 }
 function renderLoading() {
@@ -624,6 +683,7 @@ function renderDesk(el) {
     </section>
     ${otd.length ? `<section class="desk-section"><div class="section-head"><h2>${otdLabel}</h2><p>${fmtDate(today(), true).replace(/,? \d{4}$/, '')}, in years past</p></div><div class="strip">${otd.map(c => tileHTML(c)).join('')}</div></section>` : ''}
     ${recent.length ? `<section class="desk-section"><div class="section-head"><h2>Recently edited</h2><p>On this device</p></div><div class="strip">${recent.map(c => tileHTML(c)).join('')}</div></section>` : ''}
+    ${S.books.size ? `<section class="desk-section"><div class="section-head"><h2>On the floor</h2><p>Book ideas and sermon series you’re arranging</p></div><div class="covers covers-strip">${sortedBooks().slice(0, 8).map(coverHTML).join('')}</div></section>` : ''}
     <section class="desk-section"><div class="section-head"><h2>Your boxes</h2><p>Pick one and flip through it.</p></div>
       <div class="dividers">${allBoxes().map(x => `<a class="divider" href="${hashFor({ kind: 'box', name: x.name })}" style="--h:${x.hue}"><span class="divider-tab">${esc(x.name)}</span><span class="divider-body"><span class="divider-name">${esc(x.name)}</span><span class="divider-desc">${esc(x.description || '')}</span><span class="divider-count">${num(cn.box.get(x.name) || 0)} cards</span></span></a>`).join('')}</div>
     </section>`;
@@ -678,6 +738,7 @@ function backFace(c) {
       ${fact('Date', esc(fmtDate(c.date, true)))}
       ${fact('From Evernote', esc(c.evernote))}
       ${fact('Projects', tags(c.projects))}
+      ${fact('Used in', booksWith(c.path).map(({ b, ch }) => `<a class="usedin" href="${bookHash(b)}"><b>${esc(b.title)}</b> · ${esc(ch.title)}</a>`).join(''))}
     </dl></div></article>`;
 }
 function renderReader() {
@@ -701,6 +762,7 @@ function renderReader() {
     <button data-act="next" aria-label="Next card" ${next ? '' : 'disabled'}>${icon('right')}</button>
     <button data-act="draw" aria-label="Draw a random card">${icon('shuffle')}<span class="lbl">Draw</span></button>
     <button data-act="flip" aria-label="Flip card" aria-pressed="${r.flipped}">${icon('flip')}<span class="lbl">${r.flipped ? 'Front' : 'Back'}</span></button>
+    <button data-act="add-to-book" aria-label="Add to a book idea or sermon series">${icon('book')}<span class="lbl">Add to…</span></button>
     <span class="sep"></span>
     <button class="primary" data-act="edit">${icon('pen')}<span class="lbl">Edit</span></button>`;
   rd.scrollTop = 0; rd.focus({ preventScroll: true });
@@ -771,6 +833,320 @@ async function doDelete() {
   await deleteCard(c.path); r.editing = false; r.draft = null;
   hideOverlay(); if (S.readerPushed) { S.readerPushed = false; history.back(); } else history.replaceState(null, '', hashFor(S.view));
   render(); toast('Card deleted');
+}
+
+/* ---------------- book ideas & sermon series ---------------- */
+/* Both are "outlines": an ordered set of sections, each holding an ordered set of card links. */
+const LEX = {
+  book: { folder: 'Books', type: 'book', tab: 'Book ideas', one: 'book idea', One: 'Book idea', kindLabel: 'Book', unit: 'chapter', Unit: 'Chapter', units: 'chapters',
+    pitch: 'The pitch', needs: 'Still needs', needsField: 'Still needs', needsPh: 'A story, a source, a scene…', allHash: '#/books', oneHash: '#/book/', titlePh: 'A working title',
+    intro: 'Each book idea is a box of cards: chapters in order, cards in order inside them. Drag the cards until the book shows itself.',
+    pitchTip: 'Holiday’s test: can you say the book in one sentence? Put that sentence first.', unitPh: 'Chapter title', argues: 'What this chapter argues', first: 'First chapter',
+    status: [['idea', 'Idea'], ['outlining', 'Outlining'], ['drafting', 'Drafting'], ['done', 'Done']] },
+  series: { folder: 'Sermons', type: 'sermon-series', tab: 'Sermonizing', one: 'sermon series', One: 'Sermon series', kindLabel: 'Series', unit: 'sermon', Unit: 'Sermon', units: 'sermons',
+    pitch: 'The big idea', needs: 'The thread', needsField: 'The thread (how these cards connect)', needsPh: 'The line that ties these cards together', allHash: '#/sermons', oneHash: '#/series/', titlePh: 'A working title',
+    intro: 'Sermon series built only from your cards. Each week gathers cards that already belong together; the summary says what they say together. Drag cards between weeks to find the series.',
+    pitchTip: 'One sentence the whole series keeps returning to. Use only what your cards already say.', unitPh: 'Sermon title', argues: 'What these cards say together', first: 'Week one',
+    status: [['idea', 'Idea'], ['shaping', 'Shaping'], ['ready', 'Ready to preach'], ['preached', 'Preached']] },
+};
+const lex = b => LEX[b.doc || 'book'];
+const bookTimers = new Map();
+function bookHash(b) { return lex(b).oneHash + encodeURIComponent(b.title); }
+function scheduleBookSave(b, delay = 900) {
+  b.text = serializeBook(b); b.edited = Date.now(); S.books.set(b.path, b);
+  clearTimeout(bookTimers.get(b.path));
+  bookTimers.set(b.path, setTimeout(() => commitBook(b.path), delay));
+}
+async function commitBook(path) {
+  clearTimeout(bookTimers.get(path)); bookTimers.delete(path);
+  const b = S.books.get(path); if (!b) return;
+  b.text = serializeBook(b);
+  await DB.putCards([b]);
+  if (S.gh) await queue({ kind: 'put', path, text: b.text, sha: b.sha, msg: `${lex(b).One}: ${b.title}` });
+}
+function flushBookSaves() { for (const p of [...bookTimers.keys()]) commitBook(p); }
+function relinkBooks(oldPath, newPath) {
+  for (const b of S.books.values()) {
+    let hit = false;
+    for (const ch of b.chapters) {
+      if (newPath) { for (const it of ch.items) if (it.path === oldPath) { it.path = newPath; hit = true; } }
+      else { const n = ch.items.length; ch.items = ch.items.filter(it => it.path !== oldPath); if (ch.items.length !== n) hit = true; }
+    }
+    if (hit) scheduleBookSave(b, 400);
+  }
+}
+function resolveCard(b, it) {
+  const c = S.cards.get(it.path); if (c) return c;
+  const name = it.path.split('/').pop().replace(/\.md$/i, '').toLowerCase();
+  const hits = []; for (const x of S.cards.values()) if (x.titleL === name) hits.push(x);
+  if (hits.length === 1) { it.path = hits[0].path; scheduleBookSave(b, 2500); return hits[0]; }
+  return null;
+}
+function bookCounts(b) { let n = 0; for (const ch of b.chapters) n += ch.items.length; return { chapters: b.chapters.length, cards: n }; }
+function bookOrder(b) { const out = []; for (const ch of b.chapters) for (const it of ch.items) if (S.cards.has(it.path)) out.push(it.path); return out; }
+function booksWith(path) { const out = []; for (const b of S.books.values()) b.chapters.forEach((ch, i) => { if (ch.items.some(it => it.path === path)) out.push({ b, ch, i }); }); return out; }
+function sortedBooks(doc) { return [...S.books.values()].filter(b => !doc || b.doc === doc).sort((a, b) => (b.edited || 0) - (a.edited || 0) || a.title.localeCompare(b.title)); }
+function bookByName(name, doc) { return [...S.books.values()].find(b => b.title === name && b.doc === doc); }
+function uniqueBookPath(title, doc, except) {
+  const base = safeName(title) || 'Untitled'; const dir = LEX[doc].folder; let p = `${dir}/${base}.md`, i = 2;
+  while ([...S.books.keys()].some(k => k !== except && k.toLowerCase() === p.toLowerCase())) p = `${dir}/${base} (${i++}).md`;
+  return p;
+}
+async function renameBook(b, title) {
+  const np = uniqueBookPath(title, b.doc, b.path); if (np === b.path) return;
+  const old = b.path, oldSha = b.sha;
+  clearTimeout(bookTimers.get(old)); bookTimers.delete(old);
+  S.books.delete(old); await DB.delCards([old]);
+  b.path = np; b.title = np.split('/').pop().replace(/\.md$/i, ''); b.sha = null;
+  S.books.set(np, b); await commitBook(np);
+  if (S.gh && oldSha) await queue({ kind: 'del', path: old, sha: oldSha, msg: `Rename ${lex(b).one}: ${b.title}` });
+}
+function coverHTML(b) {
+  const n = bookCounts(b), L = lex(b); const st = (L.status.find(s => s[0] === b.status) || [0, b.status])[1];
+  return `<a class="cover cover-${b.doc}" href="${bookHash(b)}"><span class="cover-status">${esc(st)}</span><span class="cover-title">${esc(b.title)}</span>${b.subtitle ? `<span class="cover-sub">${esc(b.subtitle)}</span>` : ''}<span class="cover-meta"><span>${num(n.chapters)} ${L.units}</span><span>${num(n.cards)} cards</span></span></a>`;
+}
+function renderBooks(el, doc) {
+  const L = LEX[doc], books = sortedBooks(doc); S.list = [];
+  el.innerHTML = `<div class="view-head"><div><h1 class="view-title">${L.tab}</h1><p class="view-sub">${L.intro}</p></div>
+    <div class="view-actions"><button class="btn btn-primary" data-act="new-book" data-doc="${doc}">${icon('plus')}New ${L.one}</button></div></div>
+    ${books.length ? `<div class="covers">${books.map(coverHTML).join('')}</div>` : `<div class="empty"><h3>No ${L.one} yet</h3><p>Start one from scratch, or import an outline file in Settings.</p><button class="btn btn-primary" data-act="new-book" data-doc="${doc}">${icon('plus')}New ${L.one}</button></div>`}`;
+}
+function btileHTML(b, ci, ii, it) {
+  const c = resolveCard(b, it);
+  const menu = `<button class="bt-menu" data-btmenu="${ci}:${ii}" aria-label="Move or remove this card">${icon('grip')}</button>`;
+  const note = it.note ? `<p class="bnote">${esc(it.note)}</p>` : '';
+  if (!c) return `<div class="btile missing" data-ch="${ci}" data-idx="${ii}"><div class="bt-card"><div class="tile"><span class="tile-title">${esc(it.path.split('/').pop().replace(/\.md$/i, ''))}</span><span class="tile-text">This card isn’t in your deck any more. Remove it, or add it back.</span></div>${menu}</div>${note}</div>`;
+  return `<div class="btile" data-ch="${ci}" data-idx="${ii}"><div class="bt-card">${tileHTML(c)}${menu}</div>${note}</div>`;
+}
+function renderBook(el, b) {
+  const L = lex(b); S.list = bookOrder(b); const n = bookCounts(b);
+  let num_ = 0, part = null;
+  const chapters = b.chapters.map((ch, ci) => {
+    const front = /^(before|front|preface|intro)/i.test(ch.part || '');
+    const label = front ? '' : String(++num_);
+    let head = '';
+    if (ch.part && ch.part !== part) head = `<h2 class="part">${esc(ch.part)}</h2>`;
+    part = ch.part || part;
+    return `${head}<section class="chapter" data-ch="${ci}">
+      <header class="ch-head"><span class="ch-num" aria-hidden="true">${b.doc === 'series' && label ? '<small>week</small>' : ''}${label}</span><div class="ch-text"><h3 class="ch-title">${esc(ch.title)}</h3>${ch.note ? `<div class="ch-spine">${renderMd(ch.note)}</div>` : ''}${ch.needs ? `<p class="ch-needs"><b>${L.needs}:</b> ${esc(ch.needs)}</p>` : ''}</div>
+        <button class="icon-btn ch-more" data-chmenu="${ci}" aria-label="${L.Unit} options">${icon('dots')}</button></header>
+      <div class="ch-cards" data-ch="${ci}">${ch.items.map((it, ii) => btileHTML(b, ci, ii, it)).join('')}<button class="add-tile" data-addcards="${ci}">${icon('plus')}Add cards</button></div>
+    </section>`;
+  }).join('');
+  el.innerHTML = `<div class="view-head"><div><a class="crumb" href="${L.allHash}">${L.tab}</a><h1 class="view-title">${esc(b.title)}</h1>${b.subtitle ? `<p class="view-sub book-sub">${esc(b.subtitle)}</p>` : ''}
+      <div class="book-meta"><span>${num(n.chapters)} ${L.units}</span><span>${num(n.cards)} cards</span><label class="sr" for="book-status">Stage</label><select class="select" id="book-status">${L.status.map(([k, l]) => `<option value="${k}" ${b.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+    <div class="view-actions">${S.list.length ? `<button class="btn" data-act="book-read">${icon('stack')}Read in order</button><button class="btn" data-act="draw">${icon('shuffle')}Draw</button>` : ''}<button class="btn" data-act="edit-book">${icon('pen')}Edit ${L.pitch.toLowerCase().replace(/^the /, '')}</button></div></div>
+    ${b.pitch ? `<details class="pitch" ${b.chapters.length ? '' : 'open'}><summary>${L.pitch}</summary><div class="pitch-body">${renderMd(b.pitch)}</div></details>` : ''}
+    <p class="book-hint">Drag a card to move it${matchMedia('(pointer: coarse)').matches ? ' (press and hold first)' : ''}, or use ${icon('grip', 'ico inline')} on any card.</p>
+    ${chapters || `<div class="empty"><h3>No ${L.units} yet</h3><p>Add a ${L.unit}, then pull cards into it.</p></div>`}
+    <div class="book-foot"><button class="btn" data-act="add-chapter">${icon('plus')}Add ${L.unit}</button></div>`;
+}
+const curBook = () => S.view.kind === 'book' ? bookByName(S.view.name, S.view.doc) : null;
+
+/* menus & forms */
+function closeMenu() { const m = $('#menu'); if (m) m.remove(); }
+function openMenu(anchor, items) {
+  closeMenu();
+  const m = document.createElement('div'); m.className = 'menu'; m.id = 'menu'; m.setAttribute('role', 'menu');
+  m.innerHTML = items.map((it, i) => it.sep ? '<hr>' : `<button role="menuitem" data-mi="${i}" class="${it.danger ? 'danger' : ''}" ${it.disabled ? 'disabled' : ''}>${esc(it.label)}</button>`).join('');
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect(), w = m.offsetWidth, h = m.offsetHeight;
+  let x = Math.min(Math.max(8, r.right - w), innerWidth - w - 8), y = r.bottom + 6;
+  if (y + h > innerHeight - 8) y = Math.max(8, r.top - h - 6);
+  m.style.left = x + 'px'; m.style.top = y + 'px';
+  m.addEventListener('click', e => { const b = e.target.closest('[data-mi]'); if (b) { e.stopPropagation(); closeMenu(); items[+b.dataset.mi].run(); } });
+  const f = m.querySelector('button:not([disabled])'); f && f.focus({ preventScroll: true });
+}
+function formBox(title, fields, okLabel) {
+  return new Promise(res => {
+    const d = $('#dialog');
+    d.innerHTML = `<h3>${esc(title)}</h3><form id="fb">${fields.map(f => `<label class="field"><span>${esc(f.label)}</span>${f.type === 'textarea'
+      ? `<textarea name="${f.name}" rows="${f.rows || 4}">${esc(f.value || '')}</textarea>`
+      : f.type === 'select' ? `<select name="${f.name}">${f.options.map(([v, l]) => `<option value="${esc(v)}" ${v === f.value ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`
+      : `<input name="${f.name}" value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}" autocomplete="off">`}</label>`).join('')}
+      <div class="prow"><button type="button" class="pbtn" data-r="0">Cancel</button><button type="submit" class="pbtn primary">${esc(okLabel)}</button></div></form>`;
+    d.hidden = false; d.classList.add('wide');
+    const done = v => { d.hidden = true; d.classList.remove('wide'); document.removeEventListener('keydown', key, true); res(v); };
+    const key = e => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } };
+    document.addEventListener('keydown', key, true);
+    $('#fb', d).addEventListener('submit', e => { e.preventDefault(); done(Object.fromEntries(new FormData(e.target))); });
+    $('[data-r="0"]', d).addEventListener('click', () => done(null));
+    const first = $('input,textarea,select', d); first && first.focus();
+  });
+}
+function moveItem(b, from, to) {
+  const [fc, fi] = from; const it = b.chapters[fc].items.splice(fi, 1)[0]; if (!it) return;
+  let [tc, ti] = to; if (fc === tc && fi < ti) ti--;
+  b.chapters[tc].items.splice(Math.max(0, Math.min(ti, b.chapters[tc].items.length)), 0, it);
+  scheduleBookSave(b); render();
+}
+function cardMenu(anchor, b, ci, ii) {
+  const L = lex(b), ch = b.chapters[ci], it = ch.items[ii];
+  openMenu(anchor, [
+    { label: 'Move earlier', disabled: ii === 0 && ci === 0, run: () => ii > 0 ? moveItem(b, [ci, ii], [ci, ii - 1]) : moveItem(b, [ci, ii], [ci - 1, b.chapters[ci - 1].items.length]) },
+    { label: 'Move later', disabled: ii === ch.items.length - 1 && ci === b.chapters.length - 1, run: () => ii < ch.items.length - 1 ? moveItem(b, [ci, ii], [ci, ii + 2]) : moveItem(b, [ci, ii], [ci + 1, 0]) },
+    { label: `Move to another ${L.unit}…`, disabled: b.chapters.length < 2, run: () => setTimeout(() => openMenu(anchor, b.chapters.map((c, k) => ({ label: c.title, disabled: k === ci, run: () => moveItem(b, [ci, ii], [k, c.items.length]) }))), 0) },
+    { label: it.note ? 'Edit note' : 'Add a note', run: async () => { const v = await formBox('Why this card is here', [{ name: 'note', label: 'Note', type: 'textarea', value: it.note, rows: 3 }], 'Save note'); if (v) { it.note = v.note.replace(/\s+/g, ' ').trim(); scheduleBookSave(b); render(); } } },
+    { sep: true },
+    { label: `Remove from this ${L.one}`, danger: true, run: () => { ch.items.splice(ii, 1); scheduleBookSave(b); render(); toast(`Removed. The card is still in your deck.`); } },
+  ]);
+}
+function chapterMenu(anchor, b, ci) {
+  const L = lex(b), ch = b.chapters[ci];
+  openMenu(anchor, [
+    { label: `Edit ${L.unit}`, run: () => editChapter(b, ci) },
+    { label: 'Add cards', run: () => openPicker(b, ci) },
+    { label: `Move ${L.unit} up`, disabled: ci === 0, run: () => { const [c] = b.chapters.splice(ci, 1); c.part = b.chapters[ci - 1].part; b.chapters.splice(ci - 1, 0, c); scheduleBookSave(b); render(); } },
+    { label: `Move ${L.unit} down`, disabled: ci === b.chapters.length - 1, run: () => { const [c] = b.chapters.splice(ci, 1); c.part = b.chapters[ci].part; b.chapters.splice(ci + 1, 0, c); scheduleBookSave(b); render(); } },
+    { sep: true },
+    { label: `Delete ${L.unit}`, danger: true, run: async () => { if (await confirmBox(`Delete this ${L.unit}?`, `“${ch.title}” and its order will go. Its ${ch.items.length} cards stay in your deck.`, `Delete ${L.unit}`)) { b.chapters.splice(ci, 1); scheduleBookSave(b); render(); } } },
+  ]);
+}
+async function editChapter(b, ci) {
+  const L = lex(b), isNew = ci == null; const ch = isNew ? { title: '', part: (b.chapters.at(-1) || {}).part || '', note: '', needs: '', items: [] } : b.chapters[ci];
+  const v = await formBox(isNew ? `New ${L.unit}` : `Edit ${L.unit}`, [
+    { name: 'title', label: `${L.Unit} title`, value: ch.title, placeholder: L.unitPh },
+    { name: 'note', label: L.argues, type: 'textarea', value: ch.note, rows: 4 },
+    { name: 'needs', label: L.needsField, value: ch.needs, placeholder: L.needsPh },
+    { name: 'part', label: 'Part', value: ch.part, placeholder: 'e.g. Part Two' },
+  ], isNew ? `Add ${L.unit}` : `Save ${L.unit}`);
+  if (!v) return;
+  Object.assign(ch, { title: v.title.trim() || `Untitled ${L.unit}`, note: v.note.trim(), needs: v.needs.trim(), part: v.part.trim() });
+  if (isNew) b.chapters.push(ch);
+  scheduleBookSave(b); render();
+}
+function editBook(b) {
+  const L = lex(b);
+  openPanel(`${panelHead(L.pitch)}
+    <form id="book-form">
+      <label class="field"><span>Title</span><input name="title" value="${esc(b.title)}" required></label>
+      <label class="field"><span>Subtitle</span><input name="subtitle" value="${esc(b.subtitle)}"></label>
+      <label class="field"><span>${L.pitch}</span><textarea name="pitch" rows="16">${esc(b.pitch)}</textarea></label>
+      <p class="muted">${L.pitchTip}</p>
+      <div class="prow"><button class="pbtn primary" type="submit">Save</button><button class="pbtn" type="button" data-act="close-panel">Cancel</button><span style="flex:1"></span><button class="pbtn red" type="button" data-act="delete-book">Delete ${L.one}</button></div>
+    </form>`);
+  $('#book-form').addEventListener('submit', async e => {
+    e.preventDefault(); const f = new FormData(e.target);
+    b.subtitle = f.get('subtitle').trim(); b.pitch = f.get('pitch').trim();
+    const t = f.get('title').trim();
+    if (t && t !== b.title) { await renameBook(b, t); history.replaceState(null, '', bookHash(b)); S.view = { kind: 'book', doc: b.doc, name: b.title }; }
+    else scheduleBookSave(b, 200);
+    closePanel(); render(); toast('Saved');
+  });
+}
+async function newBook(doc) {
+  const L = LEX[doc];
+  const v = await formBox(`New ${L.one}`, [{ name: 'title', label: 'Working title', placeholder: L.titlePh }, { name: 'subtitle', label: 'Subtitle (optional)' }], `Create ${L.one}`);
+  if (!v || !v.title.trim()) return;
+  const path = uniqueBookPath(v.title.trim(), doc);
+  const b = makeBook(path, `---\ntype: ${L.type}\nsubtitle: ${q(v.subtitle.trim())}\nstatus: idea\n---\n## ${L.pitch}\n\n\n## ${L.first}\n`, null);
+  S.books.set(path, b); await commitBook(path);
+  location.hash = bookHash(b);
+}
+async function deleteBook(b) {
+  const L = lex(b);
+  if (!(await confirmBox(`Delete this ${L.one}?`, `“${b.title}” will be removed from every device. Its cards stay in your deck.`, `Delete ${L.one}`))) return;
+  clearTimeout(bookTimers.get(b.path)); bookTimers.delete(b.path);
+  S.books.delete(b.path); await DB.delCards([b.path]);
+  if (S.gh && b.sha) await queue({ kind: 'del', path: b.path, sha: b.sha, msg: `Delete ${L.one}: ${b.title}` });
+  closePanel(); location.hash = L.allHash; toast(`${L.One} deleted`);
+}
+function openPicker(b, ci) {
+  const ch = b.chapters[ci];
+  openPanel(`${panelHead('Add cards')}
+    <p class="muted">Adding to <b>${esc(ch.title)}</b> in <b>${esc(b.title)}</b>. Tap a card to add it to the end.</p>
+    <div class="search pick-search">${icon('search')}<input id="pick-q" type="search" placeholder="Search your cards" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Search your cards"></div>
+    <div id="pick-list" class="pick-list"></div>`);
+  S.picker = { b, ci };
+  const inp = $('#pick-q'), list = $('#pick-list');
+  const draw_ = () => {
+    const toks = (inp.value.toLowerCase().match(/"[^"]+"|\S+/g) || []).map(t => t.replace(/^"|"$/g, '')).filter(Boolean);
+    const inBook = new Set(b.chapters.flatMap(c => c.items.map(i => i.path)));
+    const res = toks.length ? searchList([...S.cards.values()], toks).slice(0, 60) : [];
+    list.innerHTML = !toks.length ? `<p class="muted">Search all ${num(S.cards.size)} cards by any word.</p>` : !res.length ? '<p class="muted">No card says that.</p>'
+      : res.map(c => `<button class="pick ${inBook.has(c.path) ? 'added' : ''}" data-pick="${esc(c.path)}"><span class="pick-t">${hl(c.title, toks)}</span><span class="pick-b">${esc(c.box || 'Inbox')}${c.date ? ', ' + esc(fmtDate(c.date)) : ''}</span><span class="pick-x">${hl(excerpt(c, toks, 160), toks)}</span><span class="pick-s">${inBook.has(c.path) ? 'Added' : 'Add'}</span></button>`).join('');
+  };
+  S.picker.draw = draw_;
+  inp.addEventListener('input', debounce(draw_, 60)); draw_();
+  setTimeout(() => inp.focus(), 120);
+}
+function pickCard(path) {
+  const p = S.picker; if (!p) return; const ch = p.b.chapters[p.ci]; if (!ch) return;
+  if (ch.items.some(i => i.path === path)) { toast(`Already in “${ch.title}”`); return; }
+  ch.items.push({ path, note: '' }); scheduleBookSave(p.b); p.draw(); render();
+  toast(`Added to ${ch.title}`);
+}
+function addToBookMenu(anchor, path) {
+  const books = sortedBooks();
+  if (!books.length) { toast('Start a book idea or sermon series first.'); return; }
+  const pickChapter = b => {
+    if (!b.chapters.length) b.chapters.push({ title: lex(b).first, part: '', note: '', needs: '', items: [] });
+    setTimeout(() => openMenu(anchor, b.chapters.map(ch => ({ label: ch.title, run: () => {
+      if (ch.items.some(i => i.path === path)) { toast(`Already in “${ch.title}”`); return; }
+      ch.items.push({ path, note: '' }); scheduleBookSave(b); toast(`Added to ${b.title}: ${ch.title}`); renderReader();
+    } }))), 0);
+  };
+  openMenu(anchor, books.map(b => ({ label: `${lex(b).kindLabel}: ${b.title}`, run: () => pickChapter(b) })));
+}
+
+/* drag cards between sections: mouse drags at once; touch drags after a short press */
+let drag = null, suppressClick = 0;
+function dragStart() {
+  const d = drag; d.started = true; closeMenu();
+  const r = d.el.getBoundingClientRect(); d.dx = d.x - r.left; d.dy = d.y - r.top;
+  const g = d.el.cloneNode(true); g.classList.add('ghost'); g.style.width = r.width + 'px'; g.style.left = r.left + 'px'; g.style.top = r.top + 'px';
+  document.body.appendChild(g); d.ghost = g; d.el.classList.add('dragging'); document.body.classList.add('is-dragging');
+  if (navigator.vibrate) try { navigator.vibrate(8); } catch (_) { }
+  const tick = () => { if (!drag || !drag.started) return; const y = drag.cy; const edge = 90; if (y < edge) scrollBy(0, -Math.ceil((edge - y) / 6)); else if (y > innerHeight - edge) scrollBy(0, Math.ceil((y - innerHeight + edge) / 6)); drag.raf = requestAnimationFrame(tick); };
+  d.raf = requestAnimationFrame(tick);
+}
+function dragTarget(x, y) {
+  const els = document.elementsFromPoint(x, y);
+  const tile = els.map(e => e.closest && e.closest('.btile')).find(t => t && t !== drag.el && !t.classList.contains('ghost'));
+  if (tile) { const r = tile.getBoundingClientRect(); const after = x > r.left + r.width / 2; return { el: tile, ch: +tile.dataset.ch, idx: +tile.dataset.idx + (after ? 1 : 0), side: after ? 'after' : 'before' }; }
+  const zone = els.map(e => e.closest && e.closest('.ch-cards, .chapter')).find(Boolean);
+  if (zone) { const ci = +zone.dataset.ch; const b = curBook(); return { el: zone.classList.contains('chapter') ? zone.querySelector('.ch-cards') : zone, ch: ci, idx: b ? b.chapters[ci].items.length : 0, side: 'end' }; }
+  return null;
+}
+function clearMarks() { $$('.drop-before,.drop-after,.drop-end').forEach(e => e.classList.remove('drop-before', 'drop-after', 'drop-end')); }
+function dragEnd(commit) {
+  const d = drag; drag = null; if (!d) return;
+  clearTimeout(d.timer); cancelAnimationFrame(d.raf);
+  if (!d.started) return;
+  suppressClick = Date.now();
+  d.ghost && d.ghost.remove(); d.el.classList.remove('dragging'); document.body.classList.remove('is-dragging'); clearMarks();
+  if (commit && d.target) { const b = curBook(); if (b) moveItem(b, [+d.el.dataset.ch, +d.el.dataset.idx], [d.target.ch, d.target.idx]); }
+}
+function bindDrag() {
+  document.addEventListener('pointerdown', e => {
+    const el = e.target.closest('.btile'); if (!el || e.button > 0 || e.target.closest('.bt-menu') || S.view.kind !== 'book') return;
+    drag = { el, x: e.clientX, y: e.clientY, cy: e.clientY, touch: e.pointerType !== 'mouse', started: false };
+    if (drag.touch) drag.timer = setTimeout(() => { if (drag && !drag.started) dragStart(); }, 380);
+  });
+  document.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dist = Math.hypot(e.clientX - drag.x, e.clientY - drag.y);
+    if (!drag.started) { if (drag.touch) { if (dist > 10) dragEnd(false); return; } if (dist < 6) return; dragStart(); }
+    e.preventDefault(); drag.cy = e.clientY;
+    drag.ghost.style.left = (e.clientX - drag.dx) + 'px'; drag.ghost.style.top = (e.clientY - drag.dy) + 'px';
+    const t = dragTarget(e.clientX, e.clientY); clearMarks(); drag.target = t;
+    if (t) t.el.classList.add(t.side === 'end' ? 'drop-end' : 'drop-' + t.side);
+  }, { passive: false });
+  document.addEventListener('pointerup', () => dragEnd(true));
+  document.addEventListener('pointercancel', () => dragEnd(false));
+  document.addEventListener('touchmove', e => { if (drag && drag.started) e.preventDefault(); }, { passive: false });
+  document.addEventListener('contextmenu', e => { if (e.target.closest('.btile') && S.view.kind === 'book') e.preventDefault(); });
+  document.addEventListener('click', e => { if (Date.now() - suppressClick < 400) { e.stopPropagation(); e.preventDefault(); } }, true);
+  document.addEventListener('pointerdown', e => { const m = $('#menu'); if (m && !m.contains(e.target) && !e.target.closest('[data-btmenu],[data-chmenu],[data-act="add-to-book"]')) closeMenu(); }, true);
+}
+async function importBooks(data) {
+  const n = { book: 0, series: 0 };
+  for (const f of data.files) {
+    if (!isBookPath(f.path)) continue;
+    const old = S.books.get(f.path); const b = makeBook(f.path, f.text, old ? old.sha : null); b.edited = Date.now();
+    S.books.set(f.path, b); await commitBook(f.path); n[b.doc]++;
+  }
+  return n;
 }
 
 /* ---------------- panel: setup & settings ---------------- */
@@ -848,6 +1224,10 @@ async function connect(s, msgEl) {
   closePanel(); render(); await sync(); render(); toast('Connected. Your cards are on this device.');
 }
 function importScreen() {
+  if (S.cards.size) return openPanel(`${panelHead('Add more cards')}
+    <p>Choose a CARDECK file, like <b>cardeck-add-sermon-notes.json</b>. New cards are added to your deck. Cards you already have are never changed.</p>
+    <div class="prow"><label class="pbtn primary" for="file-in" role="button" tabindex="0">Choose file</label><button class="pbtn" data-act="close-panel">Cancel</button></div>
+    <div id="imp-status" hidden><div class="progress"><i id="imp-bar"></i></div><p class="muted" id="imp-msg"></p></div>`);
   openPanel(`${panelHead('Bring in your cards')}
     <p>${S.gh ? 'Your repository is empty.' : 'This device has no cards yet.'} Choose <b>cardeck-import.json</b>, the file that came with this app. It holds every card from your journal.</p>
     ${S.gh ? '<p class="muted">This uploads your cards to your private repository once. It takes about a minute.</p>' : ''}
@@ -862,6 +1242,7 @@ async function runImport(file) {
     show(3, 'Reading the file…');
     let data; try { data = JSON.parse(await file.text()); } catch (_) { throw new Error(`“${file.name}” isn’t the CARDECK import file. Choose cardeck-import.json.`); }
     if (data.format !== 'cardeck-import' || !Array.isArray(data.files)) throw new Error('That isn’t a CARDECK import file.');
+    if (S.cards.size || data.mode === 'add') return await addCards(data, show, s => { step = s; });
     const cardFiles = data.files.filter(f => isCardPath(f.path));
     show(8, `Preparing ${num(cardFiles.length)} cards…`);
     const cards = [];
@@ -890,6 +1271,37 @@ async function runImport(file) {
       : e.offline ? 'The connection dropped. Choose the file again to retry.' : e.message;
     show(0, `Stopped while ${step}: ${why}${e.status ? ` (GitHub ${e.status})` : ''}`);
   }
+}
+/* Adding more cards to an existing deck: new files only, existing cards are never touched. */
+async function addCards(data, show, setStep) {
+  const fresh = data.files.filter(f => isCardPath(f.path) && !S.cards.has(f.path) && ![...S.cards.keys()].some(k => k.toLowerCase() === f.path.toLowerCase()));
+  const skipped = data.files.filter(f => isCardPath(f.path)).length - fresh.length;
+  show(8, `Preparing ${num(fresh.length)} new cards…`);
+  const cards = [];
+  for (const f of fresh) cards.push(makeCard(f.path, f.text, S.gh ? await gitSha(f.text) : null));
+  let boxesChanged = false;
+  for (const b of data.boxes || []) if (!S.boxes.some(x => x.name === b.name)) { S.boxes.push(b); boxesChanged = true; }
+  if (!cards.length && !boxesChanged) { show(100, skipped ? `All ${num(skipped)} cards in this file are already in your deck.` : 'There were no cards in this file.'); return; }
+  if (S.gh) {
+    setStep('reading your repository'); show(10, 'Checking your repository…');
+    const head = await S.gh.head(); let oldSnaps = [];
+    if (head) { const tree = await S.gh.tree((await S.gh.commit(head)).tree.sha); oldSnaps = tree.tree.filter(e => /^\.cardeck\/snapshot(-\d+)?\.json$/.test(e.path)).map(e => e.path); }
+    setStep('packing a quick-start copy'); show(12, 'Packing a quick-start copy…');
+    let snapEntries = [];
+    try { snapEntries = await snapshotEntries([...S.cards.values(), ...cards], oldSnaps); } catch (e) { if (e.offline || e.status === 401) throw e; }
+    const entries = cards.map(c => ({ path: c.path, text: c.text }));
+    if (boxesChanged) entries.push({ path: '.cardeck/boxes.json', text: JSON.stringify({ version: 1, boxes: S.boxes }, null, 1) + '\n' });
+    entries.push(...snapEntries);
+    setStep('uploading your new cards');
+    const nh = await S.gh.commitFiles(entries, `Add ${cards.length} cards`, (d, t) => show(15 + Math.round(80 * d / t), `Uploading ${num(d)} of ${num(t)} files…`));
+    if (head && head === await DB.get('lastHead')) await DB.set('lastHead', nh);
+  }
+  await DB.set('boxes', S.boxes);
+  for (const c of cards) S.cards.set(c.path, c);
+  await DB.putCards(cards);
+  show(100, 'Done.');
+  await sleep(400); closePanel(); render(); syncIdle();
+  toast(`${num(cards.length)} new cards are on your desk${skipped ? ` (${num(skipped)} were already there)` : ''}.`);
 }
 async function uploadDeck() {
   importScreen(); const st = $('#imp-status'); st.hidden = false;
@@ -934,7 +1346,7 @@ function openSettings() {
     <div class="seg" role="group" aria-label="Theme">${[['auto', 'Match my device'], ['day', 'Day'], ['night', 'Night']].map(([k, l]) => `<button type="button" data-settheme="${k}" aria-pressed="${theme === k}">${l}</button>`).join('')}</div>
     <h3>Your data</h3>
     <p class="muted">Everything is plain Markdown. Download a copy any time; it opens in Obsidian or any text editor.</p>
-    <div class="prow"><button class="pbtn" data-act="export">Download all cards (.zip)</button>${S.cards.size ? '' : '<button class="pbtn" data-act="import">Import cards</button>'}</div>
+    <div class="prow"><button class="pbtn" data-act="export">Download all cards (.zip)</button>${S.cards.size ? '<button class="pbtn" data-act="import-outlines">Import more cards, book ideas or sermon series</button>' : '<button class="pbtn" data-act="import">Import cards</button>'}</div>
     <h3>Keyboard</h3>
     <div class="kbd-list"><kbd>/</kbd><span>Search</span><kbd>N</kbd><span>New card</span><kbd>R</kbd><span>Draw a random card</span><kbd>← →</kbd><span>Previous and next card</span><kbd>E</kbd><span>Edit the open card</span><kbd>F</kbd><span>Flip to the back</span><kbd>Ctrl/⌘ Enter</kbd><span>Save card</span><kbd>Esc</kbd><span>Close</span></div>
     <h3>This device</h3>
@@ -1043,6 +1455,10 @@ function bind() {
     const st = t.closest('[data-settype]'); if (st && S.reader) { readDraft(); S.reader.draft.type = st.dataset.settype; $$('[data-settype]').forEach(b => b.setAttribute('aria-pressed', b === st)); return; }
     const ua = t.closest('[data-unalso]'); if (ua && S.reader) { readDraft(); S.reader.draft.also = S.reader.draft.also.filter(x => x !== ua.dataset.unalso); renderEditor(); return; }
     const th = t.closest('[data-settheme]'); if (th) { const v = th.dataset.settheme; localStorage.setItem('cardeck.theme', v); if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; $$('[data-settheme]').forEach(b => b.setAttribute('aria-pressed', b === th)); return; }
+    const bm = t.closest('[data-btmenu]'); if (bm) { const b = curBook(); const [ci, ii] = bm.dataset.btmenu.split(':').map(Number); b && cardMenu(bm, b, ci, ii); return; }
+    const cm = t.closest('[data-chmenu]'); if (cm) { const b = curBook(); b && chapterMenu(cm, b, +cm.dataset.chmenu); return; }
+    const ac = t.closest('[data-addcards]'); if (ac) { const b = curBook(); b && openPicker(b, +ac.dataset.addcards); return; }
+    const pk = t.closest('[data-pick]'); if (pk) { pickCard(pk.dataset.pick); return; }
     const a = t.closest('[data-act]'); if (!a) return;
     switch (a.dataset.act) {
       case 'close': closeReader(); break;
@@ -1065,23 +1481,42 @@ function bind() {
       case 'pick-import': case 'import': if (a.dataset.act === 'import') importScreen(); $('#file-in').click(); break;
       case 'skip-import': closePanel(); render(); break;
       case 'close-panel': closePanel(); break;
+      case 'new-book': newBook(a.dataset.doc || 'book'); break;
+      case 'add-chapter': { const b = curBook(); b && editChapter(b, null); break; }
+      case 'edit-book': { const b = curBook(); b && editBook(b); break; }
+      case 'delete-book': { const b = curBook(); b && deleteBook(b); break; }
+      case 'book-read': S.list.length && openReader(S.list[0]); break;
+      case 'add-to-book': S.reader && addToBookMenu(a, S.reader.path); break;
+      case 'import-outlines': $('#file-in').click(); break;
       case 'sync-now': await sync(); openSettings(); break;
       case 'copy-link': { const i = $('#dev-link'); i.select(); try { await navigator.clipboard.writeText(i.value); } catch (_) { document.execCommand('copy'); } toast('Link copied. Keep it private.'); break; }
       case 'export': exportZip(); break;
       case 'disconnect': if (await confirmBox('Remove CARDECK from this device?', S.gh ? 'Your cards stay safe in your GitHub repository. This device forgets them and your token.' : 'Cards stored only on this device will be deleted. Download a copy first if you need it.', 'Remove')) { await DB.clearAll(); saveSettings(null); localStorage.removeItem('cardeck.theme'); location.hash = '#/'; location.reload(); } break;
     }
   });
-  document.addEventListener('change', e => {
+  document.addEventListener('change', async e => {
     if (e.target.id === 'sort') { S.sort = e.target.value; S.seed = Math.random(); render(); }
     if (e.target.id === 'ed-addalso' && e.target.value) { readDraft(); S.reader.draft.also.push(e.target.value); renderEditor(); }
     if (e.target.id === 'ed-box' && S.reader) { readDraft(); S.reader.draft.also = S.reader.draft.also.filter(x => x !== S.reader.draft.box); }
-    if (e.target.id === 'file-in' && e.target.files[0]) { const f = e.target.files[0]; e.target.value = ''; if ($('#panel').hidden) importScreen(); runImport(f); }
+    if (e.target.id === 'book-status') { const b = curBook(); if (b) { b.status = e.target.value; scheduleBookSave(b, 300); } return; }
+    if (e.target.id === 'file-in' && e.target.files[0]) {
+      const f = e.target.files[0]; e.target.value = '';
+      let data = null; try { data = JSON.parse(await f.text()); } catch (_) { }
+      if (data && data.format === 'cardeck-books' && Array.isArray(data.files)) {
+        const n = await importBooks(data); closePanel();
+        const parts = []; if (n.book) parts.push(`${n.book} book ${n.book === 1 ? 'idea' : 'ideas'}`); if (n.series) parts.push(`${n.series} sermon series`);
+        toast(parts.length ? `Added ${parts.join(' and ')}.` : 'That file had no book ideas or sermon series in it.');
+        location.hash = n.series && !n.book ? '#/sermons' : '#/books'; render(); return;
+      }
+      if ($('#panel').hidden || !$('#imp-status')) importScreen(); runImport(f);
+    }
   });
   document.addEventListener('keydown', e => {
     const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && S.reader && S.reader.editing) { e.preventDefault(); doSave(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); if (S.reader) closeReader(); $('#q').focus(); $('#q').select(); return; }
     if (e.key === 'Escape') {
+      if ($('#menu')) { closeMenu(); return; }
       if (!$('#dialog').hidden) return;
       if (!$('#panel').hidden) { closePanel(); return; }
       if (S.reader) { if (S.reader.editing && !S.reader.isNew) $('[data-act="cancel"]').click(); else closeReader(); return; }
@@ -1102,6 +1537,9 @@ function bind() {
   });
   window.addEventListener('online', () => sync({ quiet: true }));
   window.addEventListener('offline', syncIdle);
+  bindDrag();
+  addEventListener('pagehide', flushBookSaves);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushBookSaves(); });
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.gh && Date.now() - S.sync.last > 30000) sync({ quiet: true }); });
   setInterval(() => { if (document.visibilityState === 'visible' && S.gh) sync({ quiet: true }); else syncIdle(); }, 120000);
   setInterval(() => { if (S.sync.state === 'ok') syncIdle(); }, 30000);
