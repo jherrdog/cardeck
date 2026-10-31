@@ -3,7 +3,9 @@
    each device keeps a full copy in IndexedDB so everything is instant and works offline. */
 (() => {
 'use strict';
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
+/* Bump when the app starts tracking a new kind of file, so every device re-reads the whole repository once. */
+const TRACK_VER = 2;
 try { const z = localStorage.getItem('cardeck.size'); if (z) document.documentElement.dataset.size = z; } catch (_) { }
 const INBOX = '00 Inbox';
 const TYPES = [['idea', 'Idea'], ['quote', 'Quote'], ['story', 'Story'], ['fact', 'Fact'], ['question', 'Question']];
@@ -387,7 +389,7 @@ async function doSync({ quiet } = {}) {
     const head = await S.gh.head();
     if (!head) { syncIdle(); return; }
     const lastHead = await DB.get('lastHead');
-    if (head === lastHead && S.cards.size) { S.sync.last = Date.now(); await DB.set('lastSync', S.sync.last); syncIdle(); return; }
+    if (head === lastHead && S.cards.size && await DB.get('trackVer') === TRACK_VER) { S.sync.last = Date.now(); await DB.set('lastSync', S.sync.last); syncIdle(); return; }
     const commit = await S.gh.commit(head);
     const tree = await S.gh.tree(commit.tree.sha);
     const remote = new Map(); const snaps = []; let boxesSha = null;
@@ -424,7 +426,7 @@ async function doSync({ quiet } = {}) {
     for (const p of gone) docDel(p);
     if (changed.length) await DB.putCards(changed);
     if (gone.length) await DB.delCards(gone);
-    await DB.set('lastHead', head);
+    await DB.set('lastHead', head); await DB.set('trackVer', TRACK_VER);
     S.sync.last = Date.now(); await DB.set('lastSync', S.sync.last);
     S.loading = null;
     if (changed.length || gone.length) render();
@@ -1788,7 +1790,7 @@ function devoParse(d) {
   d._parsed = { text: d.text, v: out };
   return out;
 }
-function devoCols() { return [...(S.devos ? S.devos.values() : [])].sort((a, b) => a.title.localeCompare(b.title)).map(devoParse); }
+function devoCols() { return [...(S.devos ? S.devos.values() : [])].filter(d => !/## 1\. Title\n\n> \*\*Reference\*\*/.test(d.text) || (S.devoEdit === d.path)).sort((a, b) => a.title.localeCompare(b.title)).map(devoParse); }
 function devoAll() { return devoCols().flatMap(c => c.items.map(it => ({ col: c, it }))); }
 function devoDone() { try { return JSON.parse(localStorage.getItem('cardeck.devo') || '{}'); } catch (_) { return {}; } }
 function devoKey(col, it) { return `${col.path}#${it.n}`; }
